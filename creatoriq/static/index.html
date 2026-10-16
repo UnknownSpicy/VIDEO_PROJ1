@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>CreatorIQ — AI Clip Finder</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23173731'/%3E%3Cpath d='m16 11 14 9-14 9z' fill='%23c7f581'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">c<span>ı</span></span>CreatorIQ<span class="version">V1</span></a>
+    <div class="workspace-label">DIN STUDIO</div>
+    <button id="new-analysis" class="nav-item active"><span>◈</span> AI Clip Finder <span class="nav-dot"></span></button>
+    <div class="sidebar-caption">BIBLIOTEK <button id="refresh-history" class="icon-button" title="Uppdatera historik" aria-label="Uppdatera historik">↻</button></div>
+    <div id="history" class="history-list"><p class="subtle">Dina analyser sparas här.</p></div>
+    <div class="sidebar-bottom"><button id="open-history" class="nav-item mobile-only" aria-label="Öppna sparade analyser"><span>◷</span> Bibliotek</button><div class="privacy-note"><span class="mini-dot"></span> Lokal lagring<br><small>Historiken sparas på den här datorn.</small></div><button id="open-settings" class="nav-item"><span>⚙</span> API-inställningar</button></div>
+  </aside>
+  <div class="main-shell">
+    <header class="topbar"><div>Verktyg <span class="crumb">/</span> <strong>AI Clip Finder</strong></div><button id="key-status" class="status-pill">● Kontrollerar anslutning</button></header>
+    <main>
+      <section class="intro"><div><div class="eyebrow"><span></span> FRÅN LÅNG VIDEO TILL STARKA ÖGONBLICK</div><h1>Hitta det som <em>fastnar.</em></h1><p>Ge din video en riktning. Låt AI hitta klippen värda att dela.</p></div><div class="intro-stamp"><span>✳</span><div>Din blick.<br>AI:ns räckvidd.</div></div></section>
+      <div class="workspace-grid">
+        <section class="panel source-panel">
+          <div class="panel-heading"><div><span class="step">01</span><h2>Din källa & riktning</h2></div><span class="tiny-tag">NY ANALYS</span></div>
+          <form id="analysis-form">
+            <label for="youtube-url">YouTube-video</label>
+            <div class="input-icon"><span>▷</span><input id="youtube-url" name="youtube_url" type="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"></div>
+            <p class="field-help">Vi försöker hämta tidsatta undertexter automatiskt.</p>
+            <details id="transcript-details"><summary>Har du redan ett transkript? <span>＋</span></summary><div class="transcript-fields"><label for="transcript-file">Ladda upp SRT eller VTT</label><input id="transcript-file" type="file" accept=".srt,.vtt" name="file"><span id="file-info" class="field-help"></span><label for="transcript-text">Eller klistra in tidsatt text</label><textarea id="transcript-text" name="transcript_text" rows="6" placeholder="00:00 Första meningen.&#10;00:08 Nästa mening.&#10;00:18 [END]"></textarea><p class="field-help">SRT/VTT bevarar exakta sluttider. I radformat används nästa tidsstämpel som slut; sista raden är slutmarkör.</p><button type="button" id="load-example" class="text-button">↗ Läs in exempeltranskript</button><p class="field-help">Exemplet kräver också en OpenRouter-nyckel för AI-analys.</p></div></details>
+            <div class="label-row"><label for="instructions">Vad letar du efter?</label><span>DIN BRIEF</span></div>
+            <textarea id="instructions" name="instructions" rows="5" required minlength="3" maxlength="6000" placeholder="Hitta konkreta insikter om att bygga ett företag. Prioritera överraskande lärdomar med en stark öppning och en tydlig poäng."></textarea>
+            <div class="quick-prompts"><button type="button" data-prompt="Hitta överraskande insikter som utmanar vanliga uppfattningar. Behåll sammanhang och hela resonemang.">↗ Överraskande insikter</button><button type="button" data-prompt="Hitta konkreta, användbara råd med tydlig inledning, exempel och avslutning.">↗ Praktiska råd</button><button type="button" data-prompt="Hitta roliga och oväntade ögonblick. Behåll uppladdningen och hela poängen.">↗ Roliga ögonblick</button></div>
+            <label class="mode-label">Analysmetod</label>
+            <div class="mode-options">
+              <label class="mode-option"><input type="radio" name="mode" value="transcript" checked><span><strong>Transkript</strong><small>Hela samtalet, ord för ord</small></span><span class="recommended">STANDARD</span></label>
+              <label class="mode-option"><input type="radio" name="mode" value="multimodal"><span><strong>Transkript + bildrutor</strong><small>Komplettera med visuell kontext</small></span><span class="beta">VALFRITT</span></label>
+              <label class="mode-option"><input type="radio" name="mode" value="compare"><span><strong>Jämför båda metoderna</strong><small>Två rankningar, samma transkript</small></span></label>
+            </div>
+            <p id="vision-note" class="notice hidden">Samplade stillbilder från högst sex kandidater, ingen kontinuerlig videoförståelse. Kräver YouTube-adress, FFmpeg och en gratis bildmodell. Transkriptresultatet sparas även om bildanalysen misslyckas.</p>
+            <details class="advanced"><summary>Modeller & antal klipp <span>⌄</span></summary><div class="advanced-fields"><div class="label-row"><label for="model">Gratis textmodell</label><button type="button" id="refresh-models" class="text-button">Uppdatera</button></div><select id="model" name="model_id"><option value="">Välj automatiskt från gratisutbudet</option></select><label for="vision-model">Gratis bildmodell</label><select id="vision-model" name="vision_model_id"><option value="">Välj automatiskt från gratisutbudet</option></select><p id="model-info" class="field-help">Hämtar tillgängliga gratismodeller…</p><label for="max-clips">Maximalt antal klipp</label><input type="number" id="max-clips" name="max_clips" min="1" max="12" value="6"></div></details>
+            <button type="submit" id="analyze" class="primary-button">Hitta mina klipp <span>↗</span></button>
+            <div class="free-note"><span>◇</span> Endast gratis AI-modeller. Inget automatiskt byte till betalda.</div>
+          </form>
+        </section>
+        <section class="results-section" aria-label="Analysresultat">
+          <div class="results-header"><div><div class="eyebrow">02 / URVALET</div><h2>Dina nästa klipp</h2></div><div id="export-actions" class="hidden export-actions"><button id="export-all" class="secondary-button">↓ JSON</button><button id="export-selected" class="secondary-button">↓ Valda</button></div></div>
+          <div id="empty-state" class="empty-state"><div class="empty-art" aria-hidden="true"><div class="timeline-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="art-clip"><span>✳</span><div>ETT ÖGONBLICK<br><strong>kan räcka.</strong></div><span class="play-mark">▶</span></div><div class="timeline-ruler"><span>00:00</span><span>00:30</span><span>01:00</span></div></div><h3>Stora ögonblick gömmer sig i detaljerna.</h3><p>Lägg till din video och berätta vad du söker.<br>Dina rankade klipp visas här, med tider och motiveringar.</p><div class="empty-features"><span>✓ Förankrade tidsstämplar</span><span>✓ Hela resonemang</span><span>✓ Redigerbart urval</span></div></div>
+          <div id="job-state" class="job-state hidden" role="status"><span class="spinner"></span><div><strong id="job-title">Analysen pågår</strong><p id="job-progress"></p></div></div>
+          <div id="analysis-meta" class="analysis-meta hidden"></div>
+          <div id="warnings" class="warnings"></div>
+          <div id="mode-tabs" class="mode-tabs hidden"></div>
+          <div id="comparison" class="comparison hidden"></div>
+          <div id="clips" class="clips"></div>
+          <p id="engagement-note" class="field-help hidden">Engagemang är en subjektiv AI-bedömning, inte uppmätt prestanda. Kontrollera undertexttiderna mot originalvideon före klippning.</p>
+        </section>
+      </div>
+      <footer><span>CreatorIQ <span class="footer-dot">/</span> AI Clip Finder V1</span><span>Byggt för din kreativa process.</span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <dialog id="settings-dialog"><form id="key-form"><div class="dialog-heading"><h2>OpenRouter-inställningar</h2><button type="button" class="icon-button close-dialog" aria-label="Stäng">×</button></div><p>Nyckeln används bara på servern för OpenRouter. Den skickas aldrig tillbaka till webbläsaren eller sparas med analyser.</p><label for="api-key">API-nyckel</label><input id="api-key" type="password" autocomplete="off" required placeholder="sk-or-…" maxlength="1000"><label class="checkbox-label"><input id="persist-key" type="checkbox"> Spara säkert i systemets nyckelhanterare</label><p id="storage-note" class="field-help"></p><div class="dialog-actions"><button type="button" id="delete-key" class="secondary-button">Ta bort nyckel</button><button class="primary-button" type="submit">Spara nyckel</button></div><p class="field-help">Gratismodeller kan ha kvoter och vara otillgängliga. Transkript och valda bildrutor skickas till OpenRouter och dess modellleverantör vid analys. <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer">Hantera API-nycklar ↗</a></p></form></dialog>
+  <dialog id="history-dialog"><div class="dialog-heading"><h2>Sparade analyser</h2><button type="button" class="icon-button close-dialog" aria-label="Stäng">×</button></div><div id="mobile-history-list" class="dialog-list"></div></dialog>
+  <dialog id="edit-dialog"><form id="edit-form"><div class="dialog-heading"><h2>Justera klippgränser</h2><button type="button" class="icon-button close-dialog" aria-label="Stäng">×</button></div><p>Välj faktiska transkriptavsnitt. Tiderna följer alltid källan.</p><label for="edit-start">Börja med avsnitt</label><select id="edit-start"></select><label for="edit-end">Avsluta efter avsnitt</label><select id="edit-end"></select><p id="edit-duration" class="notice"></p><p class="field-help">AI-poäng och motivering gäller originalförslaget. Justeringen startar ingen ny AI-analys.</p><div class="dialog-actions"><button type="button" class="secondary-button close-dialog">Avbryt</button><button type="submit" class="primary-button">Spara gränser</button></div></form></dialog>
+</body>
+</html>

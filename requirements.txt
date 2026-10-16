@@ -1,0 +1,7 @@
+fastapi==0.143.2
+uvicorn==0.54.0
+httpx==0.28.1
+pydantic==2.14.1
+python-multipart==0.0.32
+yt-dlp[default]==2026.8.19
+keyring==25.7.0
