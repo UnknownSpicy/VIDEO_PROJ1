@@ -37,6 +37,20 @@ Starta om terminalen efter installation så att programmen finns i `PATH`. yt-dl
 
 YouTube kan ändå neka åtkomst från datacenter, för privata/åldersbegränsade videor eller när undertexter saknas. Ingen betalservice eller automatisk cookieinsamling används som reservväg. Manuell SRT/VTT fungerar oberoende av YouTube-åtkomst.
 
+## Felsök YouTube-hämtning i Windows
+
+Öppna PowerShell i mappen med `start.bat`. Kör följande med videons riktiga adress för att se yt-dlp:s fel utan att skriva ut metadata eller använda din OpenRouter-nyckel:
+
+```powershell
+.\.venv\Scripts\python.exe -m yt_dlp --ignore-config --no-playlist --skip-download --socket-timeout 20 --retries 0 --extractor-retries 0 --js-runtimes node --print title "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+Kommandot testar yt-dlp:s vanliga metadata-/formatupptäckt. Appens transkriptflöde använder dessutom `--ignore-no-formats-error`, så undertexter kan hämtas även om inget spelbart videoformat hittas. Bildruteanalysen kräver fortfarande riktiga videoformat. Flaggan löser inte botkontroll, privata videor, nätverksblockering eller saknade undertexter.
+
+Vid JavaScript-varning: installera aktuell Node.js LTS enligt ovan, öppna en ny terminal, kontrollera `node --version` (minst 22) och starta om appen. Att en video fungerar i webbläsaren garanterar inte att YouTube tillåter automatisk hämtning. Ingen inloggning eller cookieimport sker automatiskt.
+
+Appen visar särskilda fel för identifierade proxy-/nätverksfel, botkontroll, åldersgräns, privat video, regionkrav, förfrågningsgräns och JavaScript-/formatproblem. Råa felutskrifter sparas inte i analysresultatet eftersom de kan innehålla signerade adresser eller lokala sökvägar. Okända fel hänvisar till kommandot ovan. Varningen för saknad JavaScript-motor visar programnärvaro, inte verifierad versionskompatibilitet.
+
 ## Linux / macOS
 
 ```bash
@@ -135,7 +149,7 @@ Tester använder fixtures och mockade OpenRouter/YouTube-svar; inga riktiga nyck
 
 ### Verifierat i utvecklingsmiljön
 
-- 42 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
+- 60 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
 - Chromium: uppladdning, analys, båda metoderna, val/avvisning, tidsjustering, JSON-nedladdning, beständig historik efter sidomladdning och mobilbibliotek kontrollerades med fixtures. Inga JavaScript-fel eller horisontellt överflöde på mobil hittades.
 - OpenRouters riktiga modellkatalog kunde hämtas och gratis-/modalitetsfiltret kördes mot den.
 - **Återstår live:** inferens med en riktig OpenRouter-nyckel, YouTube-undertexter och nedladdning av YouTube-videosektioner. YouTube-åtkomst nekades av molnproxyn (403). Ingen riktig API-nyckel fanns. Bildinferens och YouTube-flödet är därför fixtureverifierade, inte verifierade mot riktiga videor här.

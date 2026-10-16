@@ -132,6 +132,40 @@ def parse_transcript(text: str, fmt="auto", source="manual") -> Transcript:
     return Transcript(cues=cues, source=source, warnings=warnings)
 
 
+def youtube_error(stderr: str) -> str:
+    """Classify known failures without exposing URLs, tokens or local paths."""
+    error = stderr.casefold()
+    fallback = " Ladda upp SRT/VTT eller använd ett manuellt tidsatt transkript."
+    if "no module named yt_dlp" in error:
+        return "yt-dlp saknas i installationen. Starta om med start.bat för att installera beroendena."
+    if "unable to connect to proxy" in error or "tunnel connection failed" in error:
+        return "Anslutningen till YouTube stoppades av en proxy. Kontrollera nätverkets proxy- och brandväggsinställningar." + fallback
+    if "certificate_verify_failed" in error or "certificate verify failed" in error:
+        return "YouTubes TLS-certifikat kunde inte verifieras. Kontrollera datorns datum och nätverkets certifikatkonfiguration. Certifikatkontrollen har inte stängts av." + fallback
+    if "not a bot" in error or "confirm you're not a bot" in error:
+        return "YouTube kräver en inloggnings-/botkontroll för hämtningen. Att videon fungerar i webbläsaren garanterar inte åtkomst via yt-dlp. Ingen inloggning eller cookieimport sker automatiskt." + fallback
+    if "private video" in error or "members-only" in error or "join this channel" in error:
+        return "YouTube anger att videon är privat eller kräver medlemskap. Prova en offentlig video." + fallback
+    if "confirm your age" in error or "age-restricted" in error or "age restricted" in error:
+        return "YouTube kräver åldersverifiering för den här videon. Prova en video utan åldersgräns." + fallback
+    if "not available in your country" in error or "geo-restricted" in error:
+        return "YouTube anger att videon inte är tillgänglig i din region." + fallback
+    if "429" in error or "too many requests" in error:
+        return "YouTube begränsar antalet förfrågningar. Vänta en stund innan du försöker igen." + fallback
+    if "403" in error or "forbidden" in error:
+        return "YouTube nekade hämtningen (HTTP 403). Det kan bero på YouTubes åtkomstkontroller eller nätverket; en saknad undertext är inte fastställd." + fallback
+    if any(marker in error for marker in ("no supported javascript runtime", "javascript runtime is unavailable",
+                                          "signature extraction failed", "challenge solving failed")):
+        return "yt-dlp kunde inte lösa YouTubes JavaScript-kontroll. Installera aktuell Node.js LTS (minst version 22), stäng servern och starta start.bat i en ny terminal. Kontrollera även att yt-dlp:s EJS-komponent är installerad." + fallback
+    if "requested format is not available" in error or "no video formats" in error:
+        return "YouTube lämnade inget användbart videoformat. Det kan bero på videons åtkomstkrav eller en misslyckad JavaScript-kontroll. Transkriptläget försöker hämta undertexter oberoende av videoformat." + fallback
+    if "video unavailable" in error or "video has been removed" in error:
+        return "YouTube anger att videon är otillgänglig eller borttagen. Kontrollera länken och prova en annan offentlig video." + fallback
+    if any(marker in error for marker in ("timed out", "name resolution", "getaddrinfo failed", "network is unreachable")):
+        return "Nätverksanslutningen till YouTube misslyckades. Kontrollera anslutningen och försök igen." + fallback
+    return "yt-dlp kunde inte hämta YouTube-resursen och orsaken kunde inte identifieras. Kör felsökningskommandot i README för mer information." + fallback
+
+
 def run_ytdlp(args: list[str], timeout=120):
     try:
         runtime = ["--js-runtimes", "node"] if shutil.which("node") else []
@@ -141,16 +175,20 @@ def run_ytdlp(args: list[str], timeout=120):
                                 encoding="utf-8", errors="replace", timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         raise UserError("YouTube-förfrågan tog för lång tid. Försök igen eller använd manuellt transkript.") from None
+    except OSError:
+        raise UserError("yt-dlp kunde inte startas. Kontrollera Python-installationen och starta om med start.bat.") from None
     if result.returncode:
-        # yt-dlp output may include signed URLs or environment details; keep it local.
-        raise UserError("YouTube kunde inte hämtas med yt-dlp. Videon kan vara privat, åldersbegränsad eller blockerad av YouTube. Prova SRT/VTT eller manuellt transkript.")
+        # Never return raw stderr: it can contain signed URLs or environment details.
+        raise UserError(youtube_error(result.stderr))
     return result.stdout
 
 
 def retrieve(url: str) -> Transcript:
     import json
     canonical = canonical_url(url)
-    metadata = json.loads(run_ytdlp(["--skip-download", "--dump-single-json", canonical]))
+    # Subtitles do not require a playable video stream. Preserve caption metadata
+    # when format discovery fails (e.g. YouTube's JavaScript challenges).
+    metadata = json.loads(run_ytdlp(["--skip-download", "--ignore-no-formats-error", "--dump-single-json", canonical]))
     available = metadata.get("subtitles", {})
     automatic = metadata.get("automatic_captions", {})
     chosen = next(((language, auto) for auto, pool in ((False, available), (True, automatic))
@@ -160,7 +198,7 @@ def retrieve(url: str) -> Transcript:
         raise UserError("Videon saknar tillgängliga undertexter. Ladda upp SRT/VTT eller klistra in ett tidsatt transkript.")
     language, auto = chosen
     with tempfile.TemporaryDirectory(prefix="creatoriq-subs-") as directory:
-        run_ytdlp(["--skip-download", "--write-auto-subs" if auto else "--write-subs",
+        run_ytdlp(["--skip-download", "--ignore-no-formats-error", "--write-auto-subs" if auto else "--write-subs",
                    "--sub-langs", language, "--sub-format", "vtt", "--paths", directory,
                    "-o", "source.%(ext)s", canonical])
         files = list(Path(directory).glob("*.vtt"))

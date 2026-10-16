@@ -26,6 +26,7 @@ async function status() {
   const data = await api('/api/status');
   state.token = data.csrf_token;
   state.configured = data.configured;
+  show('#youtube-runtime-note', data.youtube_js_runtime === false);
   $('#key-status').textContent = data.configured ? '● API-nyckel tillagd' : '○ Lägg till API-nyckel';
   $('#key-status').classList.toggle('connected', data.configured);
   $('#persist-key').disabled = !data.secure_key_storage;

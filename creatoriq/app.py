@@ -77,7 +77,8 @@ def create_app(data_dir=None, router=None, credentials=None, transcript_provider
     @app.get("/api/status")
     def status():
         return dict(configured=bool(credentials.get()), secure_key_storage=credentials.secure_backend,
-                    ffmpeg=bool(shutil.which("ffmpeg")), csrf_token=csrf)
+                    ffmpeg=bool(shutil.which("ffmpeg")),
+                    youtube_js_runtime=bool(shutil.which("node") or shutil.which("deno")), csrf_token=csrf)
 
     class KeyInput(BaseModel):
         key: str = Field(min_length=1, max_length=1000)
