@@ -183,30 +183,68 @@ def run_ytdlp(args: list[str], timeout=120):
     return result.stdout
 
 
+def subtitle_candidates(metadata: dict) -> list[tuple[str, bool]]:
+    """Prefer source speech to generated translations, with authored tracks as fallback."""
+    original = (metadata.get("language") or "").casefold()
+    original_base = original.split("-")[0]
+    candidates = []
+    for auto, pool in ((False, metadata.get("subtitles") or {}),
+                       (True, metadata.get("automatic_captions") or {})):
+        for language, formats in pool.items():
+            if language != "live_chat" and formats:
+                candidates.append((language, auto))
+
+    def priority(candidate):
+        language, auto = candidate
+        normalized = language.casefold()
+        base = normalized.removesuffix("-orig").split("-")[0]
+        matches_source = bool(original_base) and base == original_base
+        if not auto and matches_source:
+            group = 0
+        elif auto and normalized.endswith("-orig"):
+            group = 1
+        elif auto and matches_source:
+            group = 2
+        elif not auto:
+            group = 3
+        else:
+            group = 4
+        preferred = 0 if base == "en" else 1 if base == "sv" else 2
+        return group, normalized != original, preferred, normalized
+
+    return sorted(candidates, key=priority)
+
+
 def retrieve(url: str) -> Transcript:
     import json
     canonical = canonical_url(url)
     # Subtitles do not require a playable video stream. Preserve caption metadata
     # when format discovery fails (e.g. YouTube's JavaScript challenges).
     metadata = json.loads(run_ytdlp(["--skip-download", "--ignore-no-formats-error", "--dump-single-json", canonical]))
-    available = metadata.get("subtitles", {})
-    automatic = metadata.get("automatic_captions", {})
-    chosen = next(((language, auto) for auto, pool in ((False, available), (True, automatic))
-                   for preferred in ("sv", "en", "en-orig", "*")
-                   for language in pool if language != "live_chat" and (language == preferred or preferred == "*")), None)
-    if not chosen:
+    candidates = subtitle_candidates(metadata)
+    if not candidates:
         raise UserError("Videon saknar tillgängliga undertexter. Ladda upp SRT/VTT eller klistra in ett tidsatt transkript.")
-    language, auto = chosen
-    with tempfile.TemporaryDirectory(prefix="creatoriq-subs-") as directory:
-        run_ytdlp(["--skip-download", "--ignore-no-formats-error", "--write-auto-subs" if auto else "--write-subs",
-                   "--sub-langs", language, "--sub-format", "vtt", "--paths", directory,
-                   "-o", "source.%(ext)s", canonical])
-        files = list(Path(directory).glob("*.vtt"))
-        if not files:
-            raise UserError("Undertexterna kunde inte sparas. Använd manuell inmatning eller SRT/VTT.")
-        if files[0].stat().st_size > 6_000_000:
-            raise UserError("Undertextfilen är för stor för V1.")
-        transcript = parse_transcript(files[0].read_text(encoding="utf-8"), source="youtube-auto" if auto else "youtube")
-    transcript.language = language
-    transcript.title = metadata.get("title", "YouTube-video")
-    return transcript
+    failures = []
+    # Try distinct existing tracks, not repeated downloads of a rate-limited translation.
+    # Bound attempts even when YouTube advertises hundreds of translated languages.
+    for language, auto in candidates[:3]:
+        try:
+            # Isolate partial downloads from failed attempts.
+            with tempfile.TemporaryDirectory(prefix="creatoriq-subs-") as directory:
+                run_ytdlp(["--skip-download", "--ignore-no-formats-error", "--write-auto-subs" if auto else "--write-subs",
+                           "--sub-langs", re.escape(language), "--sub-format", "vtt", "--paths", directory,
+                           "-o", "source.%(ext)s", canonical])
+                files = list(Path(directory).glob("*.vtt"))
+                if not files:
+                    raise UserError("Undertexterna kunde inte sparas. Använd manuell inmatning eller SRT/VTT.")
+                if files[0].stat().st_size > 6_000_000:
+                    raise UserError("Undertextfilen är för stor för V1.")
+                transcript = parse_transcript(files[0].read_text(encoding="utf-8"), source="youtube-auto" if auto else "youtube")
+            transcript.language = language
+            transcript.title = metadata.get("title", "YouTube-video")
+            if failures:
+                transcript.warnings.append(f"Ett tidigare undertextspår kunde inte hämtas; spåret {language} användes i stället.")
+            return transcript
+        except UserError as error:
+            failures.append(str(error))
+    raise UserError(f"Inget av de {len(failures)} provade undertextspåren kunde hämtas. " + failures[-1])

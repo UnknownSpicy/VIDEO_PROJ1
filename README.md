@@ -63,7 +63,8 @@ FFmpeg och vid behov Node/Deno installeras med operativsystemets vanliga paketha
 
 ## Transkript och tidsnoggrannhet
 
-- yt-dlp hämtar manuella undertexter i första hand, annars automatiska undertexter. Svenska och engelska prioriteras. Ingen video behöver laddas ned för transkriptläget.
+- yt-dlp prioriterar undertexter på videons originalspråk: först ett matchande manuellt spår, sedan ett markerat automatiskt originalspår (`en-orig` m.fl.) eller annat automatiskt spår på originalspråket. Andra manuella spår och därefter automatiska/översatta alternativ används som reserv. När originalspråket inte framgår prioriteras engelska före svenska bland likvärdiga spår. Ingen video behöver laddas ned för transkriptläget.
+- Om ett undertextspår misslyckas provas högst tre olika befintliga spår totalt, med separat temporär katalog för varje försök. Ett misslyckat eller delvis nedladdat spår kan inte återanvändas av nästa försök. Val av reservspår visas i analysens varningar. HTTP 429 på en svensk översättning blockerar därför inte ett fungerande engelskt originalspår.
 - SRT/VTT har explicita start- och sluttider med millisekunder. HTML-markeringar och överlappande ordrepetitioner i automatiska undertexter normaliseras.
 - Ren text måste ha en tidsstämpel på varje rad, t.ex. `00:12 En mening.` Varje rad slutar vid nästa tidsstämpel. **Sista raden är en slutmarkör** och blir inte talinnehåll. Använd t.ex. `01:30 [END]`. Otidsatt text avvisas; inga tider hittas på.
 - AI:n väljer faktiska `start_cue_id` och `end_cue_id`. Servern validerar ID:n, ordning och längd, och hämtar tider och öppnings-/avslutningsdialog direkt från transkriptet. Modellgenererade tidsstämplar används aldrig.
@@ -151,7 +152,7 @@ Tester använder fixtures och mockade OpenRouter/YouTube-svar; inga riktiga nyck
 
 ### Verifierat i utvecklingsmiljön
 
-- 60 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
+- 71 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
 - Chromium: uppladdning, analys, båda metoderna, val/avvisning, tidsjustering, JSON-nedladdning, beständig historik efter sidomladdning och mobilbibliotek kontrollerades med fixtures. Inga JavaScript-fel eller horisontellt överflöde på mobil hittades. Separata modellval för text/bild, återställning efter omladdning, stopp vid borttagen modell och faktiska modell-ID:n i analysbegäran verifierades också med fixtures.
 - OpenRouters riktiga modellkatalog kunde hämtas och gratis-/modalitetsfiltret kördes mot den.
 - **Återstår live:** inferens med en riktig OpenRouter-nyckel, YouTube-undertexter och nedladdning av YouTube-videosektioner. YouTube-åtkomst nekades av molnproxyn (403). Ingen riktig API-nyckel fanns. Bildinferens och YouTube-flödet är därför fixtureverifierade, inte verifierade mot riktiga videor här.
