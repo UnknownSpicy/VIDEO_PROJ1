@@ -38,17 +38,45 @@ async function status() {
 }
 async function loadModels(refresh = false) {
   $('#refresh-models').disabled = true;
+  // Restore explicit IDs immediately, including while the catalog is loading/unreachable.
+  for (const [selector, storageKey] of [['#model', 'creatoriq.textModel'], ['#vision-model', 'creatoriq.visionModel']]) {
+    let saved = '';
+    try { saved = localStorage.getItem(storageKey) || ''; } catch { /* Session-only settings still work. */ }
+    if (!$(selector).value && saved) {
+      $(selector).add(new Option(saved + ' · sparat modellval', saved));
+      $(selector).value = saved;
+    }
+  }
   try {
     const {models} = await api('/api/models' + (refresh ? '?refresh=true' : ''));
     for (const [selector, items] of [['#model', models], ['#vision-model', models.filter(m => m.vision)]]) {
       const previous = $(selector).value;
-      $(selector).innerHTML = '<option value="">Välj automatiskt från gratisutbudet</option>' + items.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} · gratis</option>`).join('');
-      if (items.some(m => m.id === previous)) $(selector).value = previous;
+      $(selector).innerHTML = '<option value="">Välj automatiskt från gratisutbudet</option>' + items.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} · ${escapeHTML(m.id)} · gratis</option>`).join('');
+      if (previous && !items.some(m => m.id === previous)) {
+        const unavailable = new Option(previous + ' · ej tillgänglig som gratis modell', previous);
+        unavailable.dataset.unavailable = 'true';
+        // Keep it enabled so FormData cannot silently drop the explicit choice.
+        $(selector).add(unavailable);
+      }
+      $(selector).value = previous;
     }
     const visionCount = models.filter(m => m.vision).length;
     $('#model-info').textContent = `${models.length} gratis textmodeller, ${visionCount} med bildstöd. Priser kontrolleras på nytt före varje anrop.${!visionCount ? ' Ingen kompatibel gratis bildmodell just nu; välj transkriptanalys.' : ''}`;
   } catch (error) { $('#model-info').textContent = error.message; }
-  finally { $('#refresh-models').disabled = false; }
+  finally { $('#refresh-models').disabled = false; updateModelChoices(); }
+}
+function unavailableModel() {
+  const selectors = ['#model'];
+  if ($('input[name=mode]:checked').value !== 'transcript') selectors.push('#vision-model');
+  return selectors.map(s => $(s).selectedOptions[0]).find(o => o?.dataset.unavailable === 'true');
+}
+function updateModelChoices() {
+  const unavailable = unavailableModel();
+  $('#model-choice-note').textContent = unavailable
+    ? `Den valda modellen ${unavailable.value} är inte tillgänglig som kompatibel gratis modell. Välj en annan eller välj automatiskt. Ingen modell har bytts ut.`
+    : 'Modellval sparas i den här webbläsaren. En specifikt vald modell ersätts aldrig automatiskt med en annan.';
+  $('#model-choice-note').classList.toggle('warning', !!unavailable);
+  show('#vision-model-field', $('input[name=mode]:checked').value !== 'transcript');
 }
 async function history() {
   try {
@@ -119,6 +147,7 @@ async function loadAnalysis(id) {
 }
 $('#analysis-form').addEventListener('submit', async event => {
   event.preventDefault();
+  if (unavailableModel()) { toast('Den valda modellen är inte tillgänglig. Välj en annan gratis modell eller automatiskt modellval.', true); return; }
   if (!state.configured) { $('#settings-dialog').showModal(); toast('Lägg först till din OpenRouter API-nyckel.'); return; }
   const button = $('#analyze'); button.disabled = true;
   try {
@@ -147,6 +176,15 @@ for (const selector of ['#key-status','#open-settings']) $(selector).addEventLis
 for (const button of document.querySelectorAll('.close-dialog')) button.addEventListener('click', () => button.closest('dialog').close());
 $('#settings-dialog').addEventListener('close', () => { $('#api-key').value = ''; });
 $('#refresh-models').addEventListener('click', () => loadModels(true));
+for (const [selector, storageKey] of [['#model', 'creatoriq.textModel'], ['#vision-model', 'creatoriq.visionModel']]) {
+  $(selector).addEventListener('change', () => {
+    try {
+      if ($(selector).value) localStorage.setItem(storageKey, $(selector).value);
+      else localStorage.removeItem(storageKey);
+    } catch { toast('Modellvalet gäller den här sidan; webbläsaren tillåter inte att det sparas.'); }
+    updateModelChoices();
+  });
+}
 $('#refresh-history').addEventListener('click', history);
 for (const selector of ['#history','#mobile-history-list']) $(selector).addEventListener('click', event => { const button = event.target.closest('[data-analysis]'); if (button) { $('#history-dialog').close(); loadAnalysis(button.dataset.analysis); } });
 $('#open-history').addEventListener('click', () => { history(); $('#history-dialog').showModal(); });
@@ -156,7 +194,7 @@ $('#new-analysis').addEventListener('click', () => {
   localStorage.removeItem('creatoriq.lastAnalysis'); $('#youtube-url').focus();
 });
 for (const button of document.querySelectorAll('[data-prompt]')) button.addEventListener('click', () => { $('#instructions').value = button.dataset.prompt; $('#instructions').focus(); });
-for (const radio of document.querySelectorAll('input[name=mode]')) radio.addEventListener('change', () => show('#vision-note', radio.value !== 'transcript'));
+for (const radio of document.querySelectorAll('input[name=mode]')) radio.addEventListener('change', () => { show('#vision-note', radio.value !== 'transcript'); updateModelChoices(); });
 $('#transcript-file').addEventListener('change', event => { $('#file-info').textContent = event.target.files[0] ? 'Filen används före inklistrad text och automatisk hämtning.' : ''; });
 $('#load-example').addEventListener('click', async () => {
   try {

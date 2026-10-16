@@ -19,7 +19,7 @@ Efter första installationen kan du även starta med `start.bat`; den kontroller
 1. Lägg till en **OpenRouter API-nyckel** via API-inställningar.
 2. Klistra in en YouTube-adress och beskriv vilka ögonblick du söker.
 3. Om undertexter inte kan hämtas: öppna transkriptfältet, ladda upp SRT/VTT eller klistra in tidsatt text och kör igen.
-4. Välj analysmetod och vid behov en specifik gratis modell. Standardläget är transkriptanalys.
+4. Välj analysmetod och en specifik modell under **AI-modell / OpenRouter**. Modellvalet visas direkt i formuläret; text- och bildmodell väljs separat. Standardläget är transkriptanalys och automatiskt modellval.
 5. Välj, avvisa eller justera förslagen. Exportera samtliga eller endast valda klipp som JSON.
 
 Gränssnittet är på svenska och fungerar även på mobilbredd. Sparade analyser finns i sidofältet; på mobil används biblioteksknappen i sidhuvudet.
@@ -76,6 +76,8 @@ Långa transkript delas i överlappande delar, **alla delar analyseras**, dubble
 ## Gratis modeller och felhantering
 
 Modellistan upptäcks dynamiskt från `GET https://openrouter.ai/api/v1/models`; inga modellnamn är hårdkodade. Endast modeller med textutmatning, tillräcklig kontext och explicit nollpris för prompt, svar och **alla övriga annonserade prisfält** erbjuds. Generativa ljudmodeller och generella routningsalias filtreras bort. Textmodeller med JSON-stöd prioriteras när de finns.
+
+Valda modell-ID:n sparas lokalt i webbläsaren och återställs vid nästa besök. Om en specifikt vald modell försvinner eller inte längre är gratis behålls valet med en varning; analysen stoppas tills du väljer en annan gratis modell eller automatiskt modellval. Även ett tillfälligt fel vid hämtning av katalogen bevarar ditt explicita modellval. Ingen modell ersätts tyst.
 
 Priser och kompatibilitet kontrolleras på nytt **före varje inferensanrop**. Begäran anger samma modell, ingen automatisk provider-reservväg, maxpris noll för in- och utmatning och inga plugins. Betalmodeller avvisas. Om katalogen inte kan kontrolleras stoppas anropet. JSON-format begärs när modellen annonserar stöd för det; svaret valideras alltid.
 
@@ -150,7 +152,7 @@ Tester använder fixtures och mockade OpenRouter/YouTube-svar; inga riktiga nyck
 ### Verifierat i utvecklingsmiljön
 
 - 60 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
-- Chromium: uppladdning, analys, båda metoderna, val/avvisning, tidsjustering, JSON-nedladdning, beständig historik efter sidomladdning och mobilbibliotek kontrollerades med fixtures. Inga JavaScript-fel eller horisontellt överflöde på mobil hittades.
+- Chromium: uppladdning, analys, båda metoderna, val/avvisning, tidsjustering, JSON-nedladdning, beständig historik efter sidomladdning och mobilbibliotek kontrollerades med fixtures. Inga JavaScript-fel eller horisontellt överflöde på mobil hittades. Separata modellval för text/bild, återställning efter omladdning, stopp vid borttagen modell och faktiska modell-ID:n i analysbegäran verifierades också med fixtures.
 - OpenRouters riktiga modellkatalog kunde hämtas och gratis-/modalitetsfiltret kördes mot den.
 - **Återstår live:** inferens med en riktig OpenRouter-nyckel, YouTube-undertexter och nedladdning av YouTube-videosektioner. YouTube-åtkomst nekades av molnproxyn (403). Ingen riktig API-nyckel fanns. Bildinferens och YouTube-flödet är därför fixtureverifierade, inte verifierade mot riktiga videor här.
 - Windows-kommandon och nyckelhantering är implementerade för Windows men har inte körts på en Windows-maskin i denna Linuxmiljö.

@@ -40,7 +40,16 @@
               <label class="mode-option"><input type="radio" name="mode" value="compare"><span><strong>Jämför båda metoderna</strong><small>Två rankningar, samma transkript</small></span></label>
             </div>
             <p id="vision-note" class="notice hidden">Samplade stillbilder från högst sex kandidater, ingen kontinuerlig videoförståelse. Kräver YouTube-adress, FFmpeg och en gratis bildmodell. Transkriptresultatet sparas även om bildanalysen misslyckas.</p>
-            <details class="advanced"><summary>Modeller & antal klipp <span>⌄</span></summary><div class="advanced-fields"><div class="label-row"><label for="model">Gratis textmodell</label><button type="button" id="refresh-models" class="text-button">Uppdatera</button></div><select id="model" name="model_id"><option value="">Välj automatiskt från gratisutbudet</option></select><label for="vision-model">Gratis bildmodell</label><select id="vision-model" name="vision_model_id"><option value="">Välj automatiskt från gratisutbudet</option></select><p id="model-info" class="field-help">Hämtar tillgängliga gratismodeller…</p><label for="max-clips">Maximalt antal klipp</label><input type="number" id="max-clips" name="max_clips" min="1" max="12" value="6"></div></details>
+            <section class="model-settings" aria-labelledby="model-settings-title">
+              <div class="label-row"><h3 id="model-settings-title">AI-modell / OpenRouter</h3><button type="button" id="refresh-models" class="text-button">Uppdatera lista</button></div>
+              <label for="model">Gratis textmodell</label>
+              <select id="model" name="model_id"><option value="">Välj automatiskt från gratisutbudet</option></select>
+              <p class="field-help">Används för transkriptanalys och rankning. Du kan välja ett specifikt modell-ID eller låta appen välja automatiskt.</p>
+              <div id="vision-model-field" class="hidden"><label for="vision-model">Gratis bildmodell</label><select id="vision-model" name="vision_model_id"><option value="">Välj automatiskt från gratisutbudet</option></select><p class="field-help">Används för observationer av samplade videobildrutor.</p></div>
+              <p id="model-choice-note" class="field-help">Modellval sparas i den här webbläsaren. En specifikt vald modell ersätts aldrig automatiskt med en annan.</p>
+              <p id="model-info" class="field-help" role="status">Hämtar tillgängliga gratismodeller…</p>
+              <label for="max-clips">Maximalt antal klipp</label><input type="number" id="max-clips" name="max_clips" min="1" max="12" value="6">
+            </section>
             <button type="submit" id="analyze" class="primary-button">Hitta mina klipp <span>↗</span></button>
             <div class="free-note"><span>◇</span> Endast gratis AI-modeller. Inget automatiskt byte till betalda.</div>
           </form>
