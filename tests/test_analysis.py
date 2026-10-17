@@ -42,3 +42,18 @@ def test_invented_model_boundaries_never_become_clip_timestamps():
     transcript = Transcript(cues=[Cue(id='real',start=12.345,end=20.678,text='Riktigt innehåll.')],source='fixture')
     with pytest.raises(UserError,match='ogiltiga klippförslag'):
         TranscriptAnalyzer(CapturingRouter(hallucinate=True)).candidates(transcript,'Hitta poängen.',{'context_length':32000},'test',lambda _:None)
+
+
+def test_final_untimed_dialogue_is_analyzed_as_context_not_a_selectable_cue():
+    from creatoriq.transcripts import parse_transcript
+    transcript = parse_transcript('0:00 Hela början.\n0:05 Detta är sista poängen. [END]')
+    class TailRouter:
+        def complete(self,key,model,messages,max_tokens=3500):
+            payload = json.loads(messages[-1]['content'])
+            assert payload['untimed_tail_context'] == {'start':5,'text':'Detta är sista poängen.'}
+            assert len(payload['transcript']) == 1
+            assert payload['transcript'][0]['text'] == 'Hela början.'
+            assert 'never select it' in messages[0]['content']
+            return '{"clips":[]}'
+    clips, _ = TranscriptAnalyzer(TailRouter()).candidates(transcript,'Hitta poängen.',{'context_length':32000},'test',lambda _:None)
+    assert clips == []

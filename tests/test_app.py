@@ -152,3 +152,21 @@ def test_no_plaintext_keyring_and_session_key(monkeypatch):
     credentials.set('only-in-memory',False)
     assert credentials.get() == 'only-in-memory'
     assert not credentials.clear()['configured']
+
+
+def test_reported_transcript_completes_analysis_and_exports_untimed_context(client):
+    configure(client)
+    text = (FIXTURE.parent / 'equal_timestamps.txt').read_text()
+    response = client.post('/api/analyses',data={'instructions':'Hitta roliga självbärande ögonblick.','transcript_text':text})
+    assert response.status_code == 202
+    identifier = response.json()['id']
+    for _ in range(100):
+        result = client.get('/api/analyses/'+identifier).json()
+        if result['status'] in ('done','error'):
+            break
+        time.sleep(.01)
+    assert result['status'] == 'done',result
+    assert any('samma tidsstämpel' in w for w in result['warnings'])
+    assert result['transcript']['untimed_tail']['start'] == 319
+    exported = client.get(f'/api/analyses/{identifier}/export').json()
+    assert exported['transcript']['untimed_tail']['text'].startswith('The final line still needs')

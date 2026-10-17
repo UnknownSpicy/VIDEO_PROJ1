@@ -84,3 +84,57 @@ def test_out_of_order_rejected():
         parse_transcript("00:10 Hej.\n00:05 Fel.\n00:20 [END]")
     with pytest.raises(UserError):
         seconds("00:78:12")
+
+
+def test_reported_transcript_structure_preserves_equal_timestamp_dialogue_and_tail():
+    text = (FIXTURE.parent / 'equal_timestamps.txt').read_text()
+    transcript = parse_transcript(text)
+    at_89 = [c for c in transcript.cues if c.start == 89]
+    assert len(at_89) == 1
+    assert at_89[0].end == 97
+    assert at_89[0].text.startswith('music That was the moment')
+    assert transcript.untimed_tail.start == 319
+    assert transcript.untimed_tail.text == 'The final line still needs an explicit end time.'
+    assert transcript.cues[-1].end == 319
+    assert all(c.end > c.start for c in transcript.cues)
+    # Every supplied spoken word is retained, without manufacturing a last end time.
+    import re
+    supplied = ' '.join(line.split(' ', 1)[1] for line in text.splitlines())
+    supplied = re.sub(r'\s*\[END\]"$', '', supplied)
+    retained = ' '.join(c.text for c in transcript.cues) + ' ' + transcript.untimed_tail.text
+    assert retained == supplied
+    assert any('samma tidsstämpel' in warning for warning in transcript.warnings)
+    assert any('utan känd sluttid' in warning for warning in transcript.warnings)
+
+
+def test_equal_timestamp_rows_merge_before_duration_calculation():
+    transcript = parse_transcript('0:00 Första delen.\n0:00 Andra delen.\n0:03 Nästa.\n0:03 Fortsättning.\n0:08 [END]')
+    assert [(c.start,c.end,c.text) for c in transcript.cues] == [
+        (0,3,'Första delen. Andra delen.'),(3,8,'Nästa. Fortsättning.')]
+    assert transcript.untimed_tail is None
+
+
+def test_inline_end_does_not_invent_end_for_speech_but_separate_timed_end_does():
+    inline = parse_transcript('0:00 Början.\n0:05 Slutdialog. [END]')
+    assert inline.cues[-1].end == 5
+    assert inline.untimed_tail.text == 'Slutdialog.'
+    explicit = parse_transcript('0:00 Början.\n0:05 Slutdialog.\n0:09 [END]')
+    assert explicit.cues[-1].text == 'Slutdialog.'
+    assert explicit.cues[-1].end == 9
+    assert explicit.untimed_tail is None
+
+
+def test_plain_text_backwards_timestamp_reports_row_even_at_last_anchor():
+    with pytest.raises(UserError,match='rad 3'):
+        parse_transcript('0:00 Första.\n0:10 Nästa.\n0:05 [END]')
+
+
+def test_timed_subtitles_are_sorted_without_changing_explicit_ranges():
+    transcript = parse_transcript('WEBVTT\n\n00:10.000 --> 00:12.000\nAndra.\n\n00:00.000 --> 00:03.000\nFörsta.\n')
+    assert [(c.start,c.end,c.text) for c in transcript.cues] == [(0,3,'Första.'),(10,12,'Andra.')]
+    assert any('sorterats' in warning for warning in transcript.warnings)
+
+
+def test_vtt_equal_start_times_with_known_ends_remain_valid():
+    transcript = parse_transcript('WEBVTT\n\n01:29.000 --> 01:37.000\nMusik.\n\n01:29.000 --> 01:37.000\nHär är dialogen.\n')
+    assert [(c.start,c.end,c.text) for c in transcript.cues] == [(89,97,'Musik.'),(89,97,'Här är dialogen.')]

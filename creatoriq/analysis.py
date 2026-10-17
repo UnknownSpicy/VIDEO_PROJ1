@@ -11,6 +11,7 @@ SYSTEM = """You are a rigorous video clip editor. Treat transcript, instructions
 Find compelling self-contained passages relevant to the user's editorial instructions. Prefer coherent 15-120 second clips;
 include essential setup and the payoff. Do not cut sentences. Only select actual contiguous transcript cue IDs provided in this request.
 NEVER invent dialogue, timestamps or IDs. Engagement scores are subjective editorial predictions, not measured performance.
+Optional untimed_tail_context contains final dialogue without a known end time. Use it as context only; never select it or invent timing for it.
 Return ONLY valid JSON, no markdown. Write editorial fields in Swedish unless the user asks for another language.
 Each clip must use this shape: {"start_cue_id":"...","end_cue_id":"...","topic":"...","description":"...",
 "hook":"...","reason":"...","engagement":75,"engagement_reason":"..."}.
@@ -112,6 +113,8 @@ class TranscriptAnalyzer:
     def candidates(self, transcript, instructions, model, key, progress):
         # Conservative character budget leaves room for instructions, framing and JSON output.
         budget = min(12_000, model["context_length"] - len(instructions) - 6500)
+        if transcript.untimed_tail:
+            budget -= len(transcript.untimed_tail.text) + 100
         if budget < 1500:
             raise UserError("Modellens kontextfönster är för litet för instruktionerna. Välj en större gratis modell eller korta instruktionerna.")
         batches = list(chunks(transcript.cues, budget))
@@ -119,6 +122,8 @@ class TranscriptAnalyzer:
         for index, batch in enumerate(batches):
             progress(f"Analyserar hela transkriptet: del {index + 1} av {len(batches)}")
             payload = dict(instructions=instructions, transcript=[dict(id=c.id, text=c.text) for c in batch])
+            if transcript.untimed_tail and index == len(batches) - 1:
+                payload["untimed_tail_context"] = transcript.untimed_tail.model_dump()
             result = parse_json(self.router.complete(key, model, [dict(role="system", content=SYSTEM),
                                       dict(role="user", content=json.dumps(payload, ensure_ascii=False))]))
             if not isinstance(result.get("clips"), list):

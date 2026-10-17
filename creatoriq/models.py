@@ -16,12 +16,18 @@ class Cue(BaseModel):
         return self
 
 
+class UntimedTail(BaseModel):
+    start: float = Field(ge=0)
+    text: str = Field(min_length=1)
+
+
 class Transcript(BaseModel):
     cues: list[Cue]
     source: str
     language: str | None = None
     title: str = "YouTube-video"
     warnings: list[str] = Field(default_factory=list)
+    untimed_tail: UntimedTail | None = None
 
 
 class Clip(BaseModel):

@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .models import Cue, Transcript, UserError
+from .models import Cue, Transcript, UntimedTail, UserError
 
 MAX_CUES = 30_000
 STAMP = r"\d{1,3}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?"
@@ -65,6 +65,7 @@ def parse_transcript(text: str, fmt="auto", source="manual") -> Transcript:
     timed = any(RANGE.match(line) for line in lines)
     rows = []
     warnings = []
+    untimed_tail = None
     if timed:
         i = 0
         while i < len(lines):
@@ -83,22 +84,39 @@ def parse_transcript(text: str, fmt="auto", source="manual") -> Transcript:
                 raise UserError("Transkriptets sluttider måste vara efter starttiderna.")
             if value:
                 rows.append([start, end, value])
+        if any(rows[i][0] > rows[i + 1][0] for i in range(len(rows) - 1)):
+            rows.sort(key=lambda row: (row[0], row[1]))
+            warnings.append("Undertextavsnitten låg inte i tidsordning och har sorterats efter sina befintliga tidsstämplar. Inga tider har ändrats.")
     else:
         # Plain text still needs explicit anchors; never manufacture timing.
         pattern = re.compile(rf"^\s*\[?({STAMP})\]?\s+(.+)$")
-        for line in lines:
+        merged = False
+        for line_number, line in enumerate(lines, 1):
             if not line.strip():
                 continue
             match = pattern.match(line)
             if not match:
                 raise UserError("Manuell text måste ha tidsstämplar på varje rad. Använd SRT/VTT eller '00:12 Text'. Sista raden kan vara en tom slutmarkör, t.ex. '01:30 [END]'.")
-            rows.append([seconds(match[1]), None, clean(match[2])])
+            start, value = seconds(match[1]), clean(match[2])
+            if rows and start < rows[-1][0]:
+                raise UserError(f"Tidsstämpeln {match[1]} på rad {line_number} ligger före föregående tidsstämpel. Rätta ordningen; lika tidsstämplar är tillåtna.")
+            if rows and start == rows[-1][0]:
+                rows[-1][2] = clean(rows[-1][2] + " " + value)
+                merged = True
+            else:
+                rows.append([start, None, value])
+        if merged:
+            warnings.append("Rader med samma tidsstämpel har slagits ihop i textordning. Avsnittet slutar vid nästa senare tidsstämpel.")
         for i, row in enumerate(rows[:-1]):
             row[1] = rows[i + 1][0]
         if rows:
-            # A final point anchor supplies no known end; exclude it, never guess.
-            rows.pop()
-            warnings.append("Textformat: sista tidsraden används som slutmarkör. Varje rad slutar vid nästa tidsstämpel; använd SRT/VTT för exakta sluttider.")
+            # A marker after speech does not supply an end time for that speech.
+            last = rows.pop()
+            tail_text = re.sub(r'\s*\[END\][\s"\u201d\u2019\u0027]*$', '', last[2], flags=re.IGNORECASE).strip()
+            if tail_text:
+                untimed_tail = UntimedTail(start=last[0], text=tail_text)
+                warnings.append("Sista tidsraden innehåller dialog utan känd sluttid. Dialogen behålls som sammanhang för AI:n men kan inte väljas som klipp. Lägg en senare tidsstämpel med [END] på en egen rad för att även kunna klippa slutdialogen. Ingen sluttid har gissats.")
+            warnings.append("Textformat: varje rad slutar vid nästa senare tidsstämpel. Använd SRT/VTT för explicita sluttider.")
     if not rows:
         raise UserError("Inga tidsatta transkriptavsnitt hittades. Ladda upp SRT/VTT eller klistra in tidsatt text.")
     if len(rows) > MAX_CUES:
@@ -129,7 +147,7 @@ def parse_transcript(text: str, fmt="auto", source="manual") -> Transcript:
     if removed:
         warnings.append("Överlappande upprepningar i automatiska undertexter har normaliserats. Kontrollera klippgränser mot originalvideon.")
     cues = [Cue(id=f"c{i:05d}", start=row[0], end=row[1], text=row[2]) for i, row in enumerate(normalized)]
-    return Transcript(cues=cues, source=source, warnings=warnings)
+    return Transcript(cues=cues, source=source, warnings=warnings, untimed_tail=untimed_tail)
 
 
 def youtube_error(stderr: str) -> str:
