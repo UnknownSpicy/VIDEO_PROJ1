@@ -61,8 +61,8 @@ def configure(client):
     assert 'secret-test-key' not in response.text
 
 
-def submit_and_wait(client, mode='transcript', use_file=True):
-    data = dict(instructions='Hitta konkreta insikter.', mode=mode)
+def submit_and_wait(client, mode='transcript', use_file=True, max_clips=6):
+    data = dict(instructions='Hitta konkreta insikter.', mode=mode, max_clips=max_clips)
     if mode != 'transcript':
         data['youtube_url'] = 'https://www.youtube.com/watch?v=abcdefghijk'
     kwargs = {"files":{"file":('captions.vtt',FIXTURE.read_bytes(),'text/vtt')}} if use_file else {"data":{**data, 'transcript_text':FIXTURE.read_text()}}
@@ -170,3 +170,54 @@ def test_reported_transcript_completes_analysis_and_exports_untimed_context(clie
     assert result['transcript']['untimed_tail']['start'] == 319
     exported = client.get(f'/api/analyses/{identifier}/export').json()
     assert exported['transcript']['untimed_tail']['text'].startswith('The final line still needs')
+
+
+def test_server_start_refreshes_an_existing_cached_catalog(tmp_path):
+    import threading
+    catalog=[entry('old:free')]
+    refreshed=threading.Event()
+    def handler(request):
+        if catalog[0]['id']=='new:free':
+            refreshed.set()
+        return httpx.Response(200,json={'data':catalog})
+    router=OpenRouter(httpx.Client(transport=httpx.MockTransport(handler)))
+    assert router.models()[0]['id']=='old:free'
+    catalog[:]=[entry('new:free',True)]
+    app=create_app(tmp_path,router=router,credentials=FakeCredentials())
+    with TestClient(app) as client:
+        assert refreshed.wait(2),'Startup must force a fresh catalog request'
+        result=client.get('/api/models').json()['models']
+        assert result[0]['id']=='new:free'
+        assert result[0]['multimodal'] is True
+
+
+def test_catalog_failure_at_start_does_not_prevent_opening_settings_or_history(tmp_path):
+    def handler(request):
+        return httpx.Response(503,json={'error':'unavailable'})
+    app=create_app(tmp_path,router=OpenRouter(httpx.Client(transport=httpx.MockTransport(handler))),credentials=FakeCredentials())
+    with TestClient(app) as client:
+        assert client.get('/').status_code==200
+        assert client.get('/api/status').status_code==200
+        assert client.get('/api/analyses').status_code==200
+        response=client.get('/api/models?refresh=true')
+        assert response.status_code==400
+        assert 'modellista kunde inte hämtas' in response.json()['detail']
+
+
+def test_requested_clip_count_reaches_the_first_model_request(tmp_path):
+    bodies=[]
+    def handler(request):
+        if request.method=='POST':
+            bodies.append(json.loads(request.content))
+        return model_handler(request)
+    app=create_app(tmp_path,router=OpenRouter(httpx.Client(transport=httpx.MockTransport(handler))),credentials=FakeCredentials())
+    with TestClient(app) as client:
+        client.headers['X-CreatorIQ-Token']=client.get('/api/status').json()['csrf_token']
+        configure(client)
+        result=submit_and_wait(client,max_clips=3)
+        assert result['status']=='done',result
+        payload=json.loads(bodies[0]['messages'][-1]['content'])
+        assert payload['max_clips']==3
+        assert 'Select at most 3 clips.' in bodies[0]['messages'][0]['content']
+        assert bodies[0]['max_tokens']==3300
+        assert result['model_id']==result['results'][0]['model']

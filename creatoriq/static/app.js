@@ -1,6 +1,6 @@
 'use strict';
 const $ = (selector) => document.querySelector(selector);
-const state = {token: '', analysis: null, mode: 'transcript', poll: null, editing: null, configured: false};
+const state = {token: '', analysis: null, mode: 'transcript', poll: null, editing: null, configured: false, models: []};
 const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const time = (n) => {
   const ms = Math.round(Number(n) * 1000);
@@ -36,8 +36,18 @@ async function status() {
     : 'Ingen säker systemnyckelhanterare hittades. Nyckeln lagras endast i serverprocessens minne och försvinner vid omstart.';
   if (!data.ffmpeg) $('#vision-note').textContent = 'FFmpeg saknas i serverns PATH. Installera det för valfri bildruteanalys. Transkriptanalysen fungerar utan FFmpeg. Bildanalysen använder samplade stillbilder, ingen kontinuerlig videoförståelse.';
 }
-async function loadModels(refresh = false) {
+function modelModalities(model) {
+  const labels = {text: 'text', image: 'bild', audio: 'ljud', video: 'video', file: 'fil'};
+  const inputs = model.input_modalities || (model.vision ? ['text', 'image'] : ['text']);
+  return inputs.map(value => labels[value] || value).join(' + ');
+}
+function modelKind(model) {
+  return model.multimodal || model.vision || model.input_modalities?.some(value => ['image','audio','video'].includes(value))
+    ? `MULTIMODAL (${modelModalities(model)})` : 'TEXT';
+}
+async function loadModels(refresh = true) {
   $('#refresh-models').disabled = true;
+  $('#model-info').textContent = 'Kontrollerar aktuella gratismodeller hos OpenRouter…';
   // Restore explicit IDs immediately, including while the catalog is loading/unreachable.
   for (const [selector, storageKey] of [['#model', 'creatoriq.textModel'], ['#vision-model', 'creatoriq.visionModel']]) {
     let saved = '';
@@ -49,9 +59,10 @@ async function loadModels(refresh = false) {
   }
   try {
     const {models} = await api('/api/models' + (refresh ? '?refresh=true' : ''));
+    state.models = models;
     for (const [selector, items] of [['#model', models], ['#vision-model', models.filter(m => m.vision)]]) {
       const previous = $(selector).value;
-      $(selector).innerHTML = '<option value="">Välj automatiskt från gratisutbudet</option>' + items.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} · ${escapeHTML(m.id)} · gratis</option>`).join('');
+      $(selector).innerHTML = '<option value="">Välj automatiskt från gratisutbudet</option>' + items.map(m => `<option value="${escapeHTML(m.id)}">${escapeHTML(m.name)} · ${escapeHTML(m.id)} · GRATIS · ${escapeHTML(modelKind(m))}</option>`).join('');
       if (previous && !items.some(m => m.id === previous)) {
         const unavailable = new Option(previous + ' · ej tillgänglig som gratis modell', previous);
         unavailable.dataset.unavailable = 'true';
@@ -61,7 +72,8 @@ async function loadModels(refresh = false) {
       $(selector).value = previous;
     }
     const visionCount = models.filter(m => m.vision).length;
-    $('#model-info').textContent = `${models.length} gratis textmodeller, ${visionCount} med bildstöd. Priser kontrolleras på nytt före varje anrop.${!visionCount ? ' Ingen kompatibel gratis bildmodell just nu; välj transkriptanalys.' : ''}`;
+    const checked = new Date().toLocaleTimeString('sv-SE', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    $('#model-info').textContent = `${models.length} gratis modeller för textanalys, ${visionCount} med bildstöd. Kontrollerad ${checked}. Priser kontrolleras även före varje AI-anrop.${!visionCount ? ' Ingen kompatibel gratis bildmodell just nu; välj transkriptanalys.' : ''}`;
   } catch (error) { $('#model-info').textContent = error.message; }
   finally { $('#refresh-models').disabled = false; updateModelChoices(); }
 }
@@ -76,6 +88,11 @@ function updateModelChoices() {
     ? `Den valda modellen ${unavailable.value} är inte tillgänglig som kompatibel gratis modell. Välj en annan eller välj automatiskt. Ingen modell har bytts ut.`
     : 'Modellval sparas i den här webbläsaren. En specifikt vald modell ersätts aldrig automatiskt med en annan.';
   $('#model-choice-note').classList.toggle('warning', !!unavailable);
+  const selected = state.models.find(model => model.id === $('#model').value);
+  $('#model-capabilities').textContent = selected
+    ? `Vald modell: ${modelKind(selected)}. Bildruteläget använder endast modeller med bildinmatning; stöd för ljud eller video innebär inte att appen analyserar dem.`
+    : $('#model').value ? 'Egenskaper för det sparade modellvalet kunde inte bekräftas i den aktuella listan.'
+      : 'MULTIMODAL betyder att modellen även kan ta emot bild, ljud eller video. För bildruteanalys krävs bildstöd.';
   show('#vision-model-field', $('input[name=mode]:checked').value !== 'transcript');
 }
 async function history() {
@@ -99,11 +116,11 @@ function render() {
   $('#job-progress').textContent = data.error || data.progress;
   $('#analyze').disabled = working;
   $('#analyze').innerHTML = working ? 'Analys pågår…' : 'Hitta mina klipp <span>↗</span>';
-  if (data.status === 'error') {
+  if (data.status === 'error' && !data.transcript) {
     $('#job-progress').textContent += '\nDu kan lägga till SRT/VTT i transkriptfältet och starta en ny analys.';
   }
   show('#analysis-meta', !!data.transcript);
-  if (data.transcript) $('#analysis-meta').innerHTML = `<h3>${escapeHTML(data.transcript.title)}</h3><p>${data.transcript.cues.length} tidsatta avsnitt · ${escapeHTML(time(data.transcript.cues.at(-1).end))} · ${escapeHTML(data.transcript.source)}</p>`;
+  if (data.transcript) $('#analysis-meta').innerHTML = `<h3>${escapeHTML(data.transcript.title)}</h3><p>${data.transcript.cues.length} tidsatta avsnitt · ${escapeHTML(time(data.transcript.cues.at(-1).end))} · ${escapeHTML(data.transcript.source)}${data.model_id ? '<br>Textmodell: ' + escapeHTML(data.model_id) : ''}</p>`;
   $('#warnings').innerHTML = (data.warnings || []).map(w => `<div class="warning">${escapeHTML(w)}</div>`).join('');
   const results = data.results || [];
   if (!results.some(r => r.mode === state.mode)) state.mode = results[0]?.mode || 'transcript';
@@ -243,7 +260,7 @@ for (const [selector, selected] of [['#export-all',false],['#export-selected',tr
 });
 async function init() {
   try { await status(); } catch (error) { toast('Servern kunde inte nås: ' + error.message, true); }
-  history(); loadModels();
+  history(); loadModels(true);
   const last = localStorage.getItem('creatoriq.lastAnalysis'); if (last) loadAnalysis(last);
 }
 init();

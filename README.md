@@ -72,15 +72,19 @@ FFmpeg och vid behov Node/Deno installeras med operativsystemets vanliga paketha
 - Manuell justering sker genom att välja riktiga transkriptavsnitt. Det går inte att spara uppdiktade gränser. AI-poäng och redaktionell motivering beräknas inte om vid justering.
 - Noggrannheten begränsas av källans undertexter. Kontrollera alltid klipp mot originalvideon: transkript kan vara felsynkade och en meningsgräns garanterar inte att allt nödvändigt sammanhang finns med.
 
-Långa transkript delas i överlappande delar, **alla delar analyseras**, dubbletter/överlappande förslag filtreras och kandidater rankas globalt. Modellens kontextstorlek styr delstorleken. V1 tillåter högst 1,5 miljoner transkripttecken och 30 000 avsnitt. Varje del kan ge upp till sex kandidater; upp till 40 behålls inför slutrankning. Högst 12 klipp kan begäras. Ett AI-förslag kan vara högst tio minuter långt.
+Långa transkript delas i överlappande delar, **alla delar analyseras**, dubbletter/överlappande förslag filtreras och kandidater rankas globalt. Modellens kontextstorlek styr delstorleken. V1 tillåter högst 1,5 miljoner transkripttecken och 30 000 avsnitt. Inställningen **Maximalt antal klipp** styr både AI-instruktionen och högsta antalet mottagna förslag per del, samt det slutliga urvalet; upp till 40 behålls inför slutrankning. Högst 12 klipp kan begäras. Ett AI-förslag kan vara högst tio minuter långt.
 
 ## Gratis modeller och felhantering
 
-Modellistan upptäcks dynamiskt från `GET https://openrouter.ai/api/v1/models`; inga modellnamn är hårdkodade. Endast modeller med textutmatning, tillräcklig kontext och explicit nollpris för prompt, svar och **alla övriga annonserade prisfält** erbjuds. Generativa ljudmodeller och generella routningsalias filtreras bort. Textmodeller med JSON-stöd prioriteras när de finns.
+Modellistan upptäcks dynamiskt från `GET https://openrouter.ai/api/v1/models`; inga modellnamn är hårdkodade. En färsk katalog hämtas i bakgrunden vid varje serverstart och begärs på nytt när webbsidan öppnas. Knappen **Uppdatera lista** gör också en ny kontroll. Om hämtningen misslyckas visas ett fel; historik och inställningar förblir tillgängliga. Endast modeller med textutmatning, tillräcklig kontext och explicit nollpris för prompt, svar och **alla övriga annonserade prisfält** erbjuds. Generativa ljudmodeller och generella routningsalias filtreras bort. Textmodeller med JSON-stöd prioriteras när de finns. Alternativen märks **GRATIS · TEXT** eller **GRATIS · MULTIMODAL**, med indata som **text + bild**, **text + ljud** eller **bild + text + video**. Den valda modellens egenskaper visas även under listan. Bildmodellväljaren innehåller endast modeller med bildinmatning; stöd för ljud/video innebär inte att dessa analyslägen implementerats i V1.
 
 Valda modell-ID:n sparas lokalt i webbläsaren och återställs vid nästa besök. Om en specifikt vald modell försvinner eller inte längre är gratis behålls valet med en varning; analysen stoppas tills du väljer en annan gratis modell eller automatiskt modellval. Även ett tillfälligt fel vid hämtning av katalogen bevarar ditt explicita modellval. Ingen modell ersätts tyst.
 
 Priser och kompatibilitet kontrolleras på nytt **före varje inferensanrop**. Begäran anger samma modell, ingen automatisk provider-reservväg, maxpris noll för in- och utmatning och inga plugins. Betalmodeller avvisas. Om katalogen inte kan kontrolleras stoppas anropet. JSON-format begärs när modellen annonserar stöd för det; svaret valideras alltid.
+
+Svarsutrymmet för klippförslag ökar med valt antal klipp. Modellen uppmanas att skriva kortfattade metadata. Transkriptet delas med plats reserverad för svaret. Varje anrop begränsas av modellens annonserade utmatningsgräns, tillgängligt kontextutrymme och appens tak på 16 384 utmatningstoken. Bildrutor räknas separat från base64-text vid uppskattningen. När modellen annonserar stöd för resonemangsinställningar begärs låg resonemangsnivå och inga synliga resonemang. Detta garanterar inte att alla modeller slutför varje begäran.
+
+Om ett svar kapas görs högst **ett** nytt försök med större svarsutrymme, endast när modellens gränser tillåter det. Samma modell används, gratispriser kontrolleras på nytt och inga ofullständiga JSON-resultat accepteras. Ett redan komplett JSON-svar kan godtas även om leverantören markerat längdgräns; dess schema och transkriptgränser valideras fortfarande. Providerfel, tomma svar, avböjanden och avklippta svar får olika felmeddelanden. Transkriptinläsningens lyckade status och faktiskt vald textmodell visas även om AI-steget misslyckas.
 
 HTTP 429 och tillfälliga 502/503/504 återförsöks högst två gånger med begränsad väntetid. Övriga API-fel, felaktig JSON, påhittade avsnitt och kontextproblem ger tydliga fel. Inga API-fel leder till betalmodeller. Gratisgränser kan bero på ditt OpenRouter-konto; CreatorIQ köper aldrig krediter eller byter till betalda tjänster.
 
@@ -152,10 +156,11 @@ Tester använder fixtures och mockade OpenRouter/YouTube-svar; inga riktiga nyck
 
 ### Verifierat i utvecklingsmiljön
 
-- 79 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
+- 99 pytest-tester passerade, inga hoppades över; riktig FFmpeg-extraktion ingick.
 - Chromium: uppladdning, analys, båda metoderna, val/avvisning, tidsjustering, JSON-nedladdning, beständig historik efter sidomladdning och mobilbibliotek kontrollerades med fixtures. Inga JavaScript-fel eller horisontellt överflöde på mobil hittades. Separata modellval för text/bild, återställning efter omladdning, stopp vid borttagen modell och faktiska modell-ID:n i analysbegäran verifierades också med fixtures.
 - Det rapporterade transkriptet med dubbla `1:29` och en avslutande rad med både tal och `[END]` verifierades lokalt i Chromium mot fixture-API: hela dialogen bevaras, lika tider slås ihop, slutdialog utan sluttid används enbart som sammanhang och inga sluttider gissas.
-- OpenRouters riktiga modellkatalog kunde hämtas och gratis-/modalitetsfiltret kördes mot den.
+- OpenRouters riktiga modellkatalog kunde hämtas och gratis-/modalitetsfiltret samt annonserade kontext- och svarsgränser verifierades mot den.
+- Chromium med simulerade AI-svar: valt antal 3 nådde första modellbegäran, ett kapat svar återhämtades med 3 300 → 6 600 token på samma gratismodell, multimodala etiketter visades, ljudmodeller sorterades bort från bildväljaren, katalogen begärdes färsk vid sidöppning och AI-fel visade ingen missvisande uppmaning att byta transkript.
 - **Återstår live:** inferens med en riktig OpenRouter-nyckel, YouTube-undertexter och nedladdning av YouTube-videosektioner. YouTube-åtkomst nekades av molnproxyn (403). Ingen riktig API-nyckel fanns. Bildinferens och YouTube-flödet är därför fixtureverifierade, inte verifierade mot riktiga videor här.
 - Windows-kommandon och nyckelhantering är implementerade för Windows men har inte körts på en Windows-maskin i denna Linuxmiljö.
 

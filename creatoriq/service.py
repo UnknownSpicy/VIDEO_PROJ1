@@ -26,7 +26,9 @@ class AnalysisService:
                 transcript = self.transcript_provider(request.youtube_url)
             self.store.update(identifier, transcript=transcript.model_dump())
             model = self.router.choose(request.model_id, refresh=True)
-            candidates, warnings = self.analyzer.candidates(transcript, request.instructions, model, key, progress)
+            self.store.update(identifier, model_id=model["id"])
+            candidates, warnings = self.analyzer.candidates(transcript, request.instructions, model, key,
+                                                          progress, max_clips=request.max_clips)
             warnings = transcript.warnings + warnings
             progress("Rankar transkriptbaserade klipp")
             ranked = self.analyzer.rank(candidates, request.instructions, model, key, request.max_clips)

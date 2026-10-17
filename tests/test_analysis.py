@@ -57,3 +57,22 @@ def test_final_untimed_dialogue_is_analyzed_as_context_not_a_selectable_cue():
             return '{"clips":[]}'
     clips, _ = TranscriptAnalyzer(TailRouter()).candidates(transcript,'Hitta poängen.',{'context_length':32000},'test',lambda _:None)
     assert clips == []
+
+
+@pytest.mark.parametrize('requested',[1,3,6,12])
+def test_clip_limit_changes_first_prompt_and_output_budget_and_is_enforced(requested):
+    captured=[]
+    cues=[Cue(id=f'c{i:05d}',start=i*8,end=i*8+8,text=f'Fullständig mening {i}.') for i in range(12)]
+    class LimitRouter:
+        def complete(self,key,model,messages,max_tokens=3500):
+            payload=json.loads(messages[-1]['content'])
+            assert payload['max_clips']==requested
+            assert f'Select at most {requested} clips.' in messages[0]['content']
+            captured.append(max_tokens)
+            # A provider ignoring the requested maximum must still be bounded server-side.
+            return json.dumps({'clips':[dict(start_cue_id=c.id,end_cue_id=c.id,topic='Insikt',description='Beskrivning',
+                hook='Rubrik',reason='Motivering',engagement=80,engagement_reason='Konkret') for c in cues]})
+    results,_=TranscriptAnalyzer(LimitRouter()).candidates(Transcript(cues=cues,source='fixture'),
+        'Hitta tydliga klipp.',{'context_length':32000},'key',lambda _:None,max_clips=requested)
+    assert len(results)==requested
+    assert captured==[1200+700*requested]

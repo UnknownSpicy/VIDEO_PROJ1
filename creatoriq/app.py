@@ -36,8 +36,18 @@ def create_app(data_dir=None, router=None, credentials=None, transcript_provider
 
     @asynccontextmanager
     async def lifespan(app):
-        yield
-        pool.shutdown(wait=True, cancel_futures=True)
+        async def refresh_catalog():
+            try:
+                await asyncio.to_thread(router.models, refresh=True)
+            except UserError:
+                # The UI can still open history/settings and explicitly retry the catalog.
+                pass
+        catalog_task = asyncio.create_task(refresh_catalog())
+        try:
+            yield
+        finally:
+            await catalog_task
+            pool.shutdown(wait=True, cancel_futures=True)
 
     app = FastAPI(title="CreatorIQ", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.service = store, service
