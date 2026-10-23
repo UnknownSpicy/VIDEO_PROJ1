@@ -257,3 +257,95 @@ test("world generation returns only a validated bounded instance plan", async ()
     else delete process.env.OPENROUTER_API_KEY;
   }
 });
+
+test("model catalog separates compatible free and credit models and connection test validates JSON", async () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  const browserKey = ["sk-or-v1", "catalog-test-key-1234567890"].join("-");
+  let testedModel = "";
+  const provider = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
+    const url = String(input);
+    if (url.endsWith("/models"))
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              id: "example/free:free",
+              name: "Example Free",
+              description: "A compatible free model",
+              context_length: 32000,
+              pricing: { prompt: "0", completion: "0" },
+              supported_parameters: ["response_format"],
+            },
+            {
+              id: "example/paid",
+              name: "Example Paid",
+              description: "A compatible credit model",
+              context_length: 64000,
+              pricing: { prompt: "0.000001", completion: "0.000002" },
+              supported_parameters: ["response_format"],
+            },
+            {
+              id: "example/incompatible",
+              name: "No JSON",
+              pricing: { prompt: "0", completion: "0" },
+              supported_parameters: ["temperature"],
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    testedModel = body.model;
+    assert.equal(
+      new Headers(init?.headers).get("authorization"),
+      `Bearer ${browserKey}`,
+    );
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: '{"ok":true}' } }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const server = createApp(provider as typeof fetch).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const catalogResponse = await fetch(`${base}/api/models`);
+    assert.equal(catalogResponse.status, 200);
+    const catalog = await catalogResponse.json();
+    assert.equal(catalog.models.length, 2);
+    assert.equal(
+      catalog.models.find((item: { free: boolean }) => item.free).id,
+      "example/free:free",
+    );
+    assert.equal(
+      catalog.models.find((item: { free: boolean }) => !item.free).id,
+      "example/paid",
+    );
+
+    const testResponse = await fetch(`${base}/api/test-connection`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-OpenRouter-Key": browserKey,
+      },
+      body: JSON.stringify({ model: "example/free:free" }),
+    });
+    assert.equal(testResponse.status, 200);
+    const result = await testResponse.json();
+    assert.equal(result.ok, true);
+    assert.equal(testedModel, "example/free:free");
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previous) process.env.OPENROUTER_API_KEY = previous;
+    else delete process.env.OPENROUTER_API_KEY;
+  }
+});

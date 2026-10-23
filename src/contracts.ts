@@ -76,6 +76,14 @@ export const observationSchema = z
       )
       .max(3),
     memories: z.array(z.string().max(400)).max(8),
+    conversation: z
+      .array(
+        z.object({
+          role: z.enum(["observer", "npc"]),
+          text: z.string().max(400),
+        }),
+      )
+      .max(10),
     situation: z.string().max(600),
     observerMessage: z.string().max(400).optional(),
   })

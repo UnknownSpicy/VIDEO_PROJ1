@@ -1,4 +1,34 @@
 import { test, expect } from "@playwright/test";
+test.beforeEach(async ({ page }) => {
+  await page.route("**/api/models", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        models: [
+          {
+            id: "recursive/flint-v1.0:free",
+            name: "Recursive Flint",
+            description: "Free JSON-compatible model",
+            contextLength: 262144,
+            promptPrice: "0",
+            completionPrice: "0",
+            free: true,
+          },
+          {
+            id: "openai/gpt-4o-mini",
+            name: "OpenAI GPT-4o Mini",
+            description: "Credit model",
+            contextLength: 128000,
+            promptPrice: "0.00000015",
+            completionPrice: "0.0000006",
+            free: false,
+          },
+        ],
+      }),
+    });
+  });
+});
 test("observer can inspect, intervene, converse, save, restore and change speed", async ({
   page,
 }) => {
@@ -20,11 +50,14 @@ test("observer can inspect, intervene, converse, save, restore and change speed"
   await expect(
     page.getByRole("heading", { name: "Mira", exact: true }),
   ).toBeVisible();
-  await page.getByLabel("SPEAK TO MIRA").fill("Please rest now");
+  await page.getByLabel("MESSAGE MIRA").fill("Please rest now");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByRole("button", { name: "Resume simulation" }).click();
   await expect(
-    page.getByText(/short break, then get back to it/i),
+    page.locator(".chat-thread").getByText(/short break, then get back to it/i),
+  ).toBeVisible();
+  await expect(
+    page.locator(".chat-thread").getByText("Please rest now"),
   ).toBeVisible();
   await expect(
     page.getByText("Taking the observer’s advice to rest.", { exact: false }),
@@ -89,11 +122,13 @@ test("real-time voices speak visible NPC replies when enabled", async ({
   await page.getByRole("button", { name: "Close panel" }).click();
   await page.getByRole("button", { name: "Characters 03" }).click();
   await page.getByRole("button", { name: /Mira The engineer/ }).click();
-  await page.getByLabel("SPEAK TO MIRA").fill("Hello Mira");
+  await page.getByLabel("MESSAGE MIRA").fill("Hello Mira");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByRole("button", { name: "Resume simulation" }).click();
   await expect(
-    page.getByText("Hello. I’m Mira. I can hear you clearly."),
+    page
+      .locator(".chat-thread")
+      .getByText("Hello. I’m Mira. I can hear you clearly."),
   ).toBeVisible();
   await expect
     .poll(() =>
@@ -236,6 +271,48 @@ test("observer can orbit the camera while paused and reset its view", async ({
   ).toBeVisible();
 });
 
+test("model catalog supports live search, selection, testing and saved choice", async ({
+  page,
+}) => {
+  await page.route("**/api/test-connection", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ok: true,
+        model: "recursive/flint-v1.0:free",
+        latencyMs: 321,
+      }),
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pause simulation" }).click();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+  await page
+    .getByLabel("OpenRouter API key")
+    .fill(["sk-or-v1", "browser-test-key-1234567890"].join("-"));
+  await page.getByRole("searchbox", { name: "Free models" }).fill("flint");
+  await page
+    .getByLabel("Available free models")
+    .selectOption("recursive/flint-v1.0:free");
+  await expect(page.getByLabel("Selected model ID")).toHaveValue(
+    "recursive/flint-v1.0:free",
+  );
+  await page.getByRole("button", { name: "Test selected model" }).click();
+  await expect(
+    page.getByText("Connected in 321 ms. JSON responses are compatible."),
+  ).toBeVisible();
+  await page.screenshot({ path: "artifacts/model-settings.png" });
+  await page.getByRole("button", { name: "Save connection settings" }).click();
+  await expect(page.getByText("OpenRouter model setting saved.")).toBeVisible();
+
+  await page.reload();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+  await expect(page.getByLabel("Selected model ID")).toHaveValue(
+    "recursive/flint-v1.0:free",
+  );
+});
+
 test("OpenRouter key can be entered, hidden, retained for the tab, and cleared", async ({
   page,
 }) => {
@@ -245,7 +322,10 @@ test("OpenRouter key can be entered, hidden, retained for the tab, and cleared",
   await page.getByRole("button", { name: "Connection settings" }).click();
 
   const keyField = page.getByLabel("OpenRouter API key");
-  const openRouterMode = page.getByRole("button", { name: "OpenRouter" });
+  const openRouterMode = page.getByRole("button", {
+    name: "OpenRouter",
+    exact: true,
+  });
   await expect(keyField).toHaveAttribute("type", "password");
   await expect(openRouterMode).toBeDisabled();
 
@@ -269,7 +349,9 @@ test("OpenRouter key can be entered, hidden, retained for the tab, and cleared",
   await expect(page.getByLabel("OpenRouter API key")).toHaveValue(testKey);
   await page.getByRole("button", { name: "Clear API key" }).click();
   await expect(page.getByLabel("OpenRouter API key")).toHaveValue("");
-  await expect(page.getByRole("button", { name: "OpenRouter" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "OpenRouter", exact: true }),
+  ).toBeDisabled();
   expect(
     await page.evaluate(() =>
       sessionStorage.getItem("sim-proj1-openrouter-key"),

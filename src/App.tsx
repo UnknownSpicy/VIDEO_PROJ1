@@ -17,7 +17,10 @@ import {
   Play,
   Plus,
   Radio,
+  RefreshCw,
   RotateCcw,
+  Save,
+  Search,
   Send,
   Settings2,
   Sparkles,
@@ -25,6 +28,7 @@ import {
   Trash2,
   Upload,
   Volume2,
+  Wifi,
   Users,
   X,
 } from "lucide-react";
@@ -39,17 +43,112 @@ import {
   log,
   observe,
   parseSave,
+  recordNpcReply,
   type World,
 } from "./engine";
 import { decisionSchema, instancePlanSchema } from "./contracts";
 const SAVE_KEY = "sim-proj1-world-v1";
 const OPENROUTER_SESSION_KEY = "sim-proj1-openrouter-key";
 const VOICE_KEY = "sim-proj1-voice-settings";
+const SETTINGS_KEY = "sim-proj1-settings-v1";
+type OpenRouterModel = {
+  id: string;
+  name: string;
+  description: string;
+  contextLength: number;
+  promptPrice: string;
+  completionPrice: string;
+  free: boolean;
+};
 type VoiceSettings = {
   enabled: boolean;
   rate: number;
   voices: Record<string, string>;
 };
+function readSavedSettings() {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") as {
+      model?: string;
+      worldPrompt?: string;
+    };
+  } catch {
+    return {};
+  }
+}
+function pricePerMillion(value: string) {
+  const cost = Number(value) * 1_000_000;
+  if (!Number.isFinite(cost)) return "?";
+  return cost < 0.01 ? "< $0.01" : `$${cost.toFixed(cost < 1 ? 2 : 1)}`;
+}
+function ModelPicker({
+  kind,
+  models,
+  selected,
+  loading,
+  onSelect,
+}: {
+  kind: "free" | "paid";
+  models: OpenRouterModel[];
+  selected: string;
+  loading: boolean;
+  onSelect: (id: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const filtered = models
+    .filter((candidate) => candidate.free === (kind === "free"))
+    .filter((candidate) =>
+      `${candidate.name} ${candidate.id}`
+        .toLowerCase()
+        .includes(search.trim().toLowerCase()),
+    )
+    .slice(0, 120);
+  const selectedHere = filtered.some((candidate) => candidate.id === selected);
+  return (
+    <div className="model-picker">
+      <label htmlFor={`${kind}-model-search`}>
+        {kind === "free" ? "Free models" : "OpenRouter credit models"}
+      </label>
+      <div className="model-search">
+        <Search size={15} />
+        <input
+          id={`${kind}-model-search`}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder={`Search ${kind === "free" ? "free" : "credit"} models…`}
+          role="searchbox"
+        />
+      </div>
+      <select
+        aria-label={
+          kind === "free" ? "Available free models" : "Available credit models"
+        }
+        value={selectedHere ? selected : ""}
+        onChange={(event) => onSelect(event.target.value)}
+        disabled={loading || filtered.length === 0}
+      >
+        <option value="">
+          {loading
+            ? "Loading current models…"
+            : filtered.length
+              ? `Choose from ${filtered.length} matching models…`
+              : "No matching models"}
+        </option>
+        {filtered.map((candidate) => (
+          <option key={candidate.id} value={candidate.id}>
+            {candidate.name} · {candidate.id}
+            {kind === "paid"
+              ? ` · in ${pricePerMillion(candidate.promptPrice)}/M · out ${pricePerMillion(candidate.completionPrice)}/M`
+              : " · FREE"}
+          </option>
+        ))}
+      </select>
+      <span className="micro">
+        {filtered.length} current catalog match
+        {filtered.length === 1 ? "" : "es"}
+      </span>
+    </div>
+  );
+}
 type Panel = "agents" | "intervene" | "journal" | "settings" | null;
 export default function App() {
   const world = useRef<World>(createWorld());
@@ -72,12 +171,24 @@ export default function App() {
   });
   const [showApiKey, setShowApiKey] = useState(false);
   const [mode, setMode] = useState<"local" | "live">("local");
-  const [model, setModel] = useState("openai/gpt-4o-mini");
+  const [model, setModel] = useState(
+    () => readSavedSettings().model || "openai/gpt-4o-mini",
+  );
   const [thinking, setThinking] = useState<string | null>(null);
   const [aiError, setAiError] = useState("");
   const [worldPrompt, setWorldPrompt] = useState(
-    "A small isolated research habitat where three people must restore communications before nightfall.",
+    () =>
+      readSavedSettings().worldPrompt ||
+      "A small isolated research habitat where three people must restore communications before nightfall.",
   );
+  const [models, setModels] = useState<OpenRouterModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+  const [catalogRefresh, setCatalogRefresh] = useState(0);
+  const [connectionTest, setConnectionTest] = useState<{
+    state: "idle" | "testing" | "success" | "error";
+    text: string;
+  }>({ state: "idle", text: "" });
   const [generatingWorld, setGeneratingWorld] = useState(false);
   const [contextAgent, setContextAgent] = useState("mira");
   const [availableVoices, setAvailableVoices] = useState<
@@ -111,6 +222,7 @@ export default function App() {
     liveEnabled = useRef(false);
   const lastAi = useRef(0);
   const lastEvent = useRef<HTMLDivElement>(null);
+  const chatEnd = useRef<HTMLDivElement>(null);
   const spokenUntil = useRef<Record<string, number>>({});
   const fileInput = useRef<HTMLInputElement>(null);
   // Stop simulation synchronously: React effects can run after the next frame.
@@ -142,7 +254,7 @@ export default function App() {
       .then((r) => r.json())
       .then((s) => {
         setConfigured(s.configured === true);
-        if (s.model) setModel(s.model);
+        if (s.model && !readSavedSettings().model) setModel(s.model);
       })
       .catch(() =>
         setAiError(
@@ -150,6 +262,30 @@ export default function App() {
         ),
       );
   }, []);
+  useEffect(() => {
+    if (panel !== "settings") return;
+    const controller = new AbortController();
+    setModelsLoading(true);
+    setModelsError("");
+    fetch("/api/models", {
+      headers: apiKey ? { "X-OpenRouter-Key": apiKey } : {},
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok)
+          throw Error(data.error || "Could not load available models.");
+        setModels(data.models || []);
+      })
+      .catch((error) => {
+        if (error instanceof Error && error.name !== "AbortError")
+          setModelsError(error.message);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setModelsLoading(false);
+      });
+    return () => controller.abort();
+  }, [panel, catalogRefresh, apiKey]);
   useEffect(() => {
     if (!("speechSynthesis" in window)) return;
     const load = () => setAvailableVoices(window.speechSynthesis.getVoices());
@@ -271,13 +407,10 @@ export default function App() {
           const reply =
             d.message.trim() ||
             "I hear you. I’ll keep that in mind as I decide what to do.";
-          agent.message = reply;
-          agent.messageUntil =
-            w.time + Math.max(5, Math.min(10, reply.length / 12));
-          log(w, "speech", `${agent.name} → Observer: “${reply}”`);
+          recordNpcReply(w, agent, reply);
           if (agent.decision) agent.decision.message = "";
         }
-        agent.inbox = undefined;
+        delete agent.inbox;
         setAiError("");
         log(w, "system", `${agent.name} chose to ${d.action} · OpenRouter`);
       } catch (e) {
@@ -298,6 +431,9 @@ export default function App() {
   useEffect(() => {
     lastEvent.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [snapshot.sequence, panel]);
+  useEffect(() => {
+    chatEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [snapshot.sequence, selected]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).matches("input,textarea,select,button"))
@@ -340,6 +476,62 @@ export default function App() {
       notify("Experiment saved in this browser.");
     } catch {
       notify("Browser storage is unavailable. Use Export instead.");
+    }
+  };
+  const saveSettings = (messageText: string, includeWorld = false) => {
+    try {
+      localStorage.setItem(
+        SETTINGS_KEY,
+        JSON.stringify({ model, worldPrompt: worldPrompt.trim() }),
+      );
+      localStorage.setItem(VOICE_KEY, JSON.stringify(voiceSettings));
+      if (includeWorld) {
+        localStorage.setItem(SAVE_KEY, JSON.stringify(world.current));
+        setSaveExists(true);
+      }
+      notify(messageText);
+    } catch {
+      notify(
+        "Browser storage is unavailable. Settings remain active for this tab.",
+      );
+    }
+  };
+  const chooseModel = (id: string) => {
+    if (!id) return;
+    generation.current++;
+    setModel(id);
+    setAiError("");
+    setConnectionTest({ state: "idle", text: "" });
+  };
+  const testConnection = async () => {
+    if (!providerReady || !model) return;
+    setConnectionTest({ state: "testing", text: "Testing model…" });
+    try {
+      const response = await fetch("/api/test-connection", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "X-OpenRouter-Key": apiKey } : {}),
+        },
+        body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(23000),
+      });
+      const data = await response.json();
+      if (!response.ok)
+        throw Error(data.error || "The connection test failed.");
+      setConnectionTest({
+        state: "success",
+        text: `Connected in ${data.latencyMs} ms. JSON responses are compatible.`,
+      });
+      setAiError("");
+    } catch (error) {
+      setConnectionTest({
+        state: "error",
+        text:
+          error instanceof Error
+            ? error.message
+            : "The connection test failed.",
+      });
     }
   };
   const load = () => {
@@ -783,39 +975,76 @@ export default function App() {
                         ))}
                     </ul>
                   </details>
-                  <form
-                    className="message-form"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      send();
-                    }}
+                  <section
+                    className="chat-interface"
+                    aria-label={`Chat with ${agent.name}`}
                   >
-                    <label htmlFor="message">
-                      SPEAK TO {agent.name.toUpperCase()}
-                    </label>
-                    <div>
-                      <input
-                        id="message"
-                        value={message}
-                        maxLength={400}
-                        onChange={(e) => setMessage(e.target.value)}
-                        placeholder="What would you like to say?"
-                        disabled={ended}
-                      />
-                      <button
-                        className="icon-button"
-                        aria-label="Send message"
-                        disabled={!message.trim() || ended}
-                      >
-                        <Send size={17} />
-                      </button>
+                    <div className="chat-header">
+                      <span>
+                        <MessageSquare size={14} /> Conversation
+                      </span>
+                      <small>{agent.chatHistory.length}/50 messages</small>
                     </div>
-                    <span className="micro">
-                      {mode === "local"
-                        ? "Local mode uses simple replies and recognizes food, rest, and help."
-                        : "The character considers your words at their next decision."}
-                    </span>
-                  </form>
+                    <div className="chat-thread" aria-live="polite">
+                      {agent.chatHistory.length === 0 && (
+                        <p className="chat-empty">
+                          Start a conversation. What you say becomes part of{" "}
+                          {agent.name}’s memory and future model context.
+                        </p>
+                      )}
+                      {agent.chatHistory.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className={`chat-message ${entry.role}`}
+                        >
+                          <span>
+                            {entry.role === "observer" ? "You" : agent.name}
+                          </span>
+                          <p>{entry.text}</p>
+                          <time>{clock(entry.time)}</time>
+                        </div>
+                      ))}
+                      {agent.inbox && (
+                        <div className="chat-typing">
+                          {agent.name} is considering your message…
+                        </div>
+                      )}
+                      <div ref={chatEnd} />
+                    </div>
+                    <form
+                      className="message-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        send();
+                      }}
+                    >
+                      <label htmlFor="message">
+                        MESSAGE {agent.name.toUpperCase()}
+                      </label>
+                      <div>
+                        <input
+                          id="message"
+                          value={message}
+                          maxLength={400}
+                          onChange={(e) => setMessage(e.target.value)}
+                          placeholder="Write a message…"
+                          disabled={ended || !!agent.inbox}
+                        />
+                        <button
+                          className="icon-button"
+                          aria-label="Send message"
+                          disabled={!message.trim() || ended || !!agent.inbox}
+                        >
+                          <Send size={17} />
+                        </button>
+                      </div>
+                      <span className="micro">
+                        {mode === "local"
+                          ? "Local replies use rules; your message still updates memory and behavior."
+                          : "OpenRouter receives recent chat, personality, memories, and world context."}
+                      </span>
+                    </form>
+                  </section>
                 </>
               )}
             </>
@@ -941,6 +1170,12 @@ export default function App() {
                     ? "Creating instance…"
                     : "Create new instance"}
                 </button>
+                <button
+                  className="settings-save"
+                  onClick={() => saveSettings("World prompt saved.")}
+                >
+                  <Save size={15} /> Save world prompt
+                </button>
                 <p className="micro">
                   The model creates a validated plan using one of three compact
                   layouts and biomes. Creating it starts a new paused world and
@@ -1028,22 +1263,82 @@ export default function App() {
                           : "No key connected"}
                   </span>
                 </div>
-                <label htmlFor="model">OpenRouter model</label>
+                <div className="catalog-heading">
+                  <span className="eyebrow">AVAILABLE OPENROUTER MODELS</span>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    aria-label="Refresh OpenRouter models"
+                    title="Refresh model catalog"
+                    onClick={() => setCatalogRefresh((value) => value + 1)}
+                    disabled={modelsLoading}
+                  >
+                    <RefreshCw size={15} />
+                  </button>
+                </div>
+                {modelsError && <p className="inline-error">{modelsError}</p>}
+                <ModelPicker
+                  kind="free"
+                  models={models}
+                  selected={model}
+                  loading={modelsLoading}
+                  onSelect={chooseModel}
+                />
+                <ModelPicker
+                  kind="paid"
+                  models={models}
+                  selected={model}
+                  loading={modelsLoading}
+                  onSelect={chooseModel}
+                />
+                <label htmlFor="model">Selected model ID</label>
                 <input
                   id="model"
                   value={model}
                   maxLength={120}
-                  onChange={(e) => {
+                  onChange={(event) => {
                     generation.current++;
-                    setModel(e.target.value);
+                    setModel(event.target.value);
+                    setConnectionTest({ state: "idle", text: "" });
                   }}
                   placeholder="provider/model"
                 />
+                <div className="connection-actions">
+                  <button
+                    className="test-connection"
+                    onClick={() => void testConnection()}
+                    disabled={
+                      !providerReady || connectionTest.state === "testing"
+                    }
+                  >
+                    <Wifi size={15} />
+                    {connectionTest.state === "testing"
+                      ? "Testing…"
+                      : "Test selected model"}
+                  </button>
+                  <button
+                    className="settings-save"
+                    onClick={() =>
+                      saveSettings("OpenRouter model setting saved.")
+                    }
+                  >
+                    <Save size={15} /> Save connection settings
+                  </button>
+                </div>
+                {connectionTest.state !== "idle" && (
+                  <p
+                    className={`connection-test-result ${connectionTest.state}`}
+                    role="status"
+                  >
+                    {connectionTest.text}
+                  </p>
+                )}
                 <p className="micro">
-                  Live mode: at most one decision every 8 seconds, 120
-                  requests/hour. Requires account credits. Other actions use
-                  local behavior. Session keys are sent only to this app's
-                  backend and are never included in saves or exports.
+                  The live catalog refreshes from OpenRouter and only includes
+                  models advertising JSON response support. Prices are shown per
+                  million tokens. Live mode makes at most one decision every 8
+                  seconds and 120 requests/hour. Session keys are never included
+                  in saves or exports.
                 </p>
                 {aiError && (
                   <p className="inline-error" role="alert">
@@ -1137,6 +1432,14 @@ export default function App() {
                   Changes apply immediately and are included in local choices,
                   model observations, saves, and exports.
                 </p>
+                <button
+                  className="settings-save"
+                  onClick={() =>
+                    saveSettings("World and character context saved.", true)
+                  }
+                >
+                  <Save size={15} /> Save world &amp; character context
+                </button>
               </div>
               <div className="setting-block">
                 <span className="eyebrow">REAL-TIME CHARACTER VOICES</span>
@@ -1207,6 +1510,12 @@ export default function App() {
                       when a dialogue bubble appears. Available voices depend on
                       Windows and your browser; this uses no model credits.
                     </p>
+                    <button
+                      className="settings-save"
+                      onClick={() => saveSettings("Voice settings saved.")}
+                    >
+                      <Save size={15} /> Save voice settings
+                    </button>
                   </>
                 ) : (
                   <p className="muted">

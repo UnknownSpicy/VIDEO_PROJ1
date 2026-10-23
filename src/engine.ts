@@ -74,6 +74,7 @@ export type Agent = {
   relationships: Record<string, number>;
   memories: string[];
   memoryLimit: number;
+  chatHistory: ChatMessage[];
   decision: Decision | null;
   path: Vec[];
   activity: string;
@@ -82,6 +83,12 @@ export type Agent = {
   messageUntil: number;
   cooldown: number;
   inbox?: string;
+};
+export type ChatMessage = {
+  id: number;
+  role: "observer" | "npc";
+  text: string;
+  time: number;
 };
 export type Event = {
   id: number;
@@ -158,6 +165,7 @@ export function createWorld(instance: InstancePlan = DEFAULT_INSTANCE): World {
       ),
       memories: [`You arrived at ${plan.title}. ${plan.situation}`],
       memoryLimit: 20,
+      chatHistory: [],
       decision: null,
       path: [],
       activity: "Taking in the outpost",
@@ -183,6 +191,15 @@ export function log(w: World, kind: Event["kind"], text: string) {
 function remember(a: Agent, text: string) {
   a.memories.push(text.slice(0, 400));
   a.memories = a.memories.slice(-a.memoryLimit);
+}
+function addChat(w: World, a: Agent, role: ChatMessage["role"], text: string) {
+  a.chatHistory.push({
+    id: ++w.sequence,
+    role,
+    text: text.slice(0, 400),
+    time: w.time,
+  });
+  a.chatHistory = a.chatHistory.slice(-50);
 }
 function layoutFor(w?: World) {
   return LAYOUTS[w?.instance.layout ?? "outpost"];
@@ -302,6 +319,11 @@ function speak(
     "speech",
     `${a.name}${target ? ` → ${typeof target === "string" ? target : target.name}` : ""}: “${a.message}”`,
   );
+  if (target === "Observer") addChat(w, a, "npc", a.message);
+}
+export function recordNpcReply(w: World, a: Agent, message: string) {
+  speak(w, a, message, "Observer");
+  remember(a, `You replied to the observer: ${message}`);
 }
 function observerReply(a: Agent, message: string) {
   if (/punch|hit|attack|slag|slå/i.test(message))
@@ -317,7 +339,7 @@ function observerReply(a: Agent, message: string) {
 export function localDecision(w: World, a: Agent): Decision {
   if (a.inbox) {
     const msg = a.inbox;
-    a.inbox = undefined;
+    delete a.inbox;
     const other = w.agents.find((b) => b.id !== a.id)!;
     speak(w, a, observerReply(a, msg), "Observer");
     remember(a, `Observer told you: ${msg}`);
@@ -350,7 +372,7 @@ export function localDecision(w: World, a: Agent): Decision {
   }
   if (a.provokedBy && a.health > 0) {
     const target = a.provokedBy;
-    a.provokedBy = undefined;
+    delete a.provokedBy;
     return {
       action: "punch",
       target,
@@ -527,7 +549,7 @@ export function advance(w: World, dt: number, local = true) {
             other.decision = null;
             other.path = [];
             other.activity = "Knocked out";
-            other.provokedBy = undefined;
+            delete other.provokedBy;
           }
         } else if (d.message) {
           speak(w, a, d.message, other);
@@ -609,6 +631,7 @@ export function intervene(
     const a = w.agents.find((a) => a.id === agentId);
     if (a) {
       a.inbox = message.trim().slice(0, 400);
+      addChat(w, a, "observer", a.inbox);
       remember(a, `Observer said: ${a.inbox}`);
       log(w, "observer", `Observer → ${a.name}: “${a.inbox}”`);
       a.decision = null;
@@ -649,6 +672,9 @@ export function observe(w: World, a: Agent): Observation {
         health: b.health,
       })),
     memories: a.memories.slice(-8),
+    conversation: a.chatHistory
+      .slice(-10)
+      .map(({ role, text }) => ({ role, text })),
     situation: w.instance.situation,
     observerMessage: a.inbox,
   };
@@ -671,6 +697,17 @@ const agentSchema = z.object({
   relationships: z.record(z.string(), z.number().min(-100).max(100)),
   memories: z.array(z.string().max(400)).max(30),
   memoryLimit: z.number().int().min(4).max(30).default(20),
+  chatHistory: z
+    .array(
+      z.object({
+        id: z.number().int().nonnegative(),
+        role: z.enum(["observer", "npc"]),
+        text: z.string().max(400),
+        time: z.number().min(0).max(720),
+      }),
+    )
+    .max(50)
+    .default([]),
   decision: decisionSchema.nullable(),
   path: z.array(vec).max(100),
   activity: z.string().max(200),

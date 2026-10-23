@@ -100,6 +100,12 @@ test("intervention messages persist and change a character’s next action", () 
   assert.ok(
     w.events.some((e) => e.kind === "speech" && e.text.includes("→ Observer")),
   );
+  assert.deepEqual(
+    w.agents[0].chatHistory.map(({ role }) => role),
+    ["observer", "npc"],
+  );
+  assert.equal(w.agents[0].chatHistory[0].text, "Please rest now");
+  assert.equal(observe(w, w.agents[0]).conversation.length, 2);
   intervene(w, "food");
   assert.equal(w.supplies, 12);
 });
@@ -177,8 +183,11 @@ test("food sharing transfers inventory and records trust and memory", () => {
 });
 test("saves round-trip state; corrupt saves and duplicate identities are rejected", () => {
   const w = createWorld();
+  intervene(w, "message", "mira", "Remember our conversation");
+  advance(w, 0.1);
   run(w, 12);
   assert.deepEqual(parseSave(JSON.stringify(w)), w);
+  assert.equal(parseSave(JSON.stringify(w)).agents[0].chatHistory.length, 2);
   assert.throws(() => parseSave("{bad"));
   const malformed = structuredClone(w);
   malformed.agents[0].id = malformed.agents[1].id;

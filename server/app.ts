@@ -26,6 +26,14 @@ const worldRequestSchema = z
     prompt: z.string().trim().min(10).max(1200),
   })
   .strict();
+const modelRequestSchema = z
+  .object({
+    model: z
+      .string()
+      .regex(/^[a-zA-Z0-9_.:/-]+$/)
+      .max(120),
+  })
+  .strict();
 
 function readBrowserKey(req: express.Request) {
   const key = req.get("x-openrouter-key")?.trim();
@@ -42,12 +50,197 @@ export function createApp(providerFetch: typeof fetch = fetch) {
   let lastRequest = 0;
   let windowStart = Date.now();
   let requests = 0;
+  let catalogCache:
+    | {
+        expires: number;
+        models: {
+          id: string;
+          name: string;
+          description: string;
+          contextLength: number;
+          promptPrice: string;
+          completionPrice: string;
+          free: boolean;
+        }[];
+      }
+    | undefined;
+  let connectionTests = 0;
+  let connectionWindow = Date.now();
   app.get("/api/status", (_req, res) =>
     res.json({
       configured: !!process.env.OPENROUTER_API_KEY,
       model: process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini",
     }),
   );
+  app.get("/api/models", async (req, res) => {
+    if (req.get("sec-fetch-site") === "cross-site") {
+      res.status(403).json({ error: "Cross-site requests are not allowed." });
+      return;
+    }
+    if (catalogCache && catalogCache.expires > Date.now()) {
+      res.json({ models: catalogCache.models, cached: true });
+      return;
+    }
+    try {
+      const upstream = await providerFetch(
+        "https://openrouter.ai/api/v1/models",
+        {
+          signal: AbortSignal.timeout(12000),
+          headers: { "X-Title": "SIM PROJ1" },
+        },
+      );
+      if (!upstream.ok) {
+        res.status(502).json({
+          error: `Could not load OpenRouter models (HTTP ${upstream.status}).`,
+        });
+        return;
+      }
+      const data = (await upstream.json()) as {
+        data?: {
+          id?: unknown;
+          name?: unknown;
+          description?: unknown;
+          context_length?: unknown;
+          pricing?: { prompt?: unknown; completion?: unknown };
+          supported_parameters?: unknown;
+        }[];
+      };
+      const models = (data.data || [])
+        .filter(
+          (item) =>
+            typeof item.id === "string" &&
+            item.id.length <= 120 &&
+            /^[a-zA-Z0-9_.:/-]+$/.test(item.id) &&
+            Array.isArray(item.supported_parameters) &&
+            item.supported_parameters.includes("response_format"),
+        )
+        .map((item) => {
+          const promptPrice = String(item.pricing?.prompt ?? "0").slice(0, 40);
+          const completionPrice = String(item.pricing?.completion ?? "0").slice(
+            0,
+            40,
+          );
+          return {
+            id: String(item.id).slice(0, 120),
+            name: String(item.name || item.id).slice(0, 160),
+            description: String(item.description || "").slice(0, 500),
+            contextLength:
+              typeof item.context_length === "number"
+                ? Math.max(0, Math.floor(item.context_length))
+                : 0,
+            promptPrice,
+            completionPrice,
+            free: Number(promptPrice) === 0 && Number(completionPrice) === 0,
+          };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .slice(0, 800);
+      catalogCache = { models, expires: Date.now() + 120000 };
+      res.json({ models, cached: false });
+    } catch (error) {
+      res.status(502).json({
+        error:
+          error instanceof Error && error.name === "TimeoutError"
+            ? "Loading the OpenRouter model catalog timed out."
+            : "Could not load the OpenRouter model catalog.",
+      });
+    }
+  });
+  app.post("/api/test-connection", async (req, res) => {
+    if (req.get("sec-fetch-site") === "cross-site") {
+      res.status(403).json({ error: "Cross-site requests are not allowed." });
+      return;
+    }
+    const parsed = modelRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Choose a valid OpenRouter model." });
+      return;
+    }
+    const browserKey = readBrowserKey(req);
+    if (browserKey === null) {
+      res.status(400).json({ error: "Invalid OpenRouter API key format." });
+      return;
+    }
+    const providerKey = browserKey || process.env.OPENROUTER_API_KEY;
+    if (!providerKey) {
+      res.status(503).json({ error: "Connect an OpenRouter key first." });
+      return;
+    }
+    const now = Date.now();
+    if (now - connectionWindow > 60000) {
+      connectionWindow = now;
+      connectionTests = 0;
+    }
+    if (connectionTests >= 5) {
+      res.status(429).json({ error: "Wait a minute before testing again." });
+      return;
+    }
+    connectionTests++;
+    const started = performance.now();
+    try {
+      const upstream = await providerFetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          signal: AbortSignal.timeout(20000),
+          headers: {
+            Authorization: `Bearer ${providerKey}`,
+            "Content-Type": "application/json",
+            "X-Title": "SIM PROJ1 connection test",
+          },
+          body: JSON.stringify({
+            model: parsed.data.model,
+            max_tokens: 30,
+            temperature: 0,
+            response_format: { type: "json_object" },
+            messages: [
+              {
+                role: "user",
+                content: 'Return only this JSON object: {"ok":true}',
+              },
+            ],
+          }),
+        },
+      );
+      if (!upstream.ok) {
+        const status = upstream.status === 429 ? 429 : 502;
+        res.status(status).json({
+          error: `OpenRouter returned HTTP ${upstream.status} for this model.`,
+        });
+        return;
+      }
+      const data = (await upstream.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const content = data.choices?.[0]?.message?.content || "";
+      const start = content.indexOf("{");
+      const end = content.lastIndexOf("}");
+      const compatible =
+        start >= 0 && end > start
+          ? (JSON.parse(content.slice(start, end + 1)) as { ok?: unknown })
+              .ok === true
+          : false;
+      if (!compatible) {
+        res.status(422).json({
+          error:
+            "The model connected but did not follow the JSON format required by the simulation.",
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        model: parsed.data.model,
+        latencyMs: Math.round(performance.now() - started),
+      });
+    } catch (error) {
+      res.status(502).json({
+        error:
+          error instanceof Error && error.name === "TimeoutError"
+            ? "The connection test timed out."
+            : "The connection test returned an invalid response.",
+      });
+    }
+  });
   app.post("/api/world/generate", async (req, res) => {
     if (req.get("sec-fetch-site") === "cross-site") {
       res.status(403).json({ error: "Cross-site requests are not allowed." });
