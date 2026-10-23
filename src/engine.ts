@@ -1,8 +1,11 @@
 import { z } from "zod";
 import {
+  DEFAULT_INSTANCE,
   decisionSchema,
   ids,
+  locations,
   type Decision,
+  type InstancePlan,
   type Observation,
 } from "./contracts";
 export type Vec = [number, number];
@@ -16,6 +19,42 @@ export const OBSTACLES = [
   { x: -7, z: -3, w: 5, d: 4 },
   { x: 7, z: -2, w: 4, d: 4 },
 ];
+export const LAYOUTS = {
+  outpost: {
+    places: PLACES,
+    obstacles: OBSTACLES,
+  },
+  ridge: {
+    places: {
+      antenna: [-5, -7],
+      supplies: [5, 3],
+      shelter: [-5, 5],
+      commons: [1, 1],
+    },
+    obstacles: [
+      { x: -8, z: 0, w: 4, d: 4 },
+      { x: 7, z: -2, w: 5, d: 3 },
+    ],
+  },
+  crossroads: {
+    places: {
+      antenna: [7, -5],
+      supplies: [-6, -4],
+      shelter: [6, 5],
+      commons: [0, 1],
+    },
+    obstacles: [
+      { x: -7, z: 4, w: 4, d: 4 },
+      { x: 0, z: -6, w: 4, d: 3 },
+    ],
+  },
+} satisfies Record<
+  InstancePlan["layout"],
+  {
+    places: Record<(typeof locations)[number], Vec>;
+    obstacles: typeof OBSTACLES;
+  }
+>;
 const clamp = (n: number, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, n));
 const distance = (a: Vec, b: Vec) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 export type Agent = {
@@ -29,8 +68,12 @@ export type Agent = {
   hunger: number;
   energy: number;
   food: number;
+  health: number;
+  lastHitAt: number;
+  provokedBy?: (typeof ids)[number];
   relationships: Record<string, number>;
   memories: string[];
+  memoryLimit: number;
   decision: Decision | null;
   path: Vec[];
   activity: string;
@@ -57,6 +100,7 @@ export type World = {
   events: Event[];
   sequence: number;
   seed: number;
+  instance: InstancePlan;
 };
 const personalities = [
   [
@@ -84,16 +128,18 @@ const personalities = [
     "Help restore contact, but do not work yourself to exhaustion.",
   ],
 ] as const;
-export function createWorld(): World {
+export function createWorld(instance: InstancePlan = DEFAULT_INSTANCE): World {
+  const plan = structuredClone(instance);
   return {
     version: 1,
     time: 0,
-    supplies: 8,
+    supplies: plan.startingSupplies,
     repair: 0,
-    storm: false,
+    storm: plan.startingStorm,
     outcome: "running",
     sequence: 1,
     seed: 917,
+    instance: plan,
     agents: personalities.map((p, i) => ({
       id: p[0],
       name: p[1],
@@ -105,12 +151,13 @@ export function createWorld(): World {
       hunger: 24 + i * 9,
       energy: 85 - i * 9,
       food: 1,
+      health: 100,
+      lastHitAt: -100,
       relationships: Object.fromEntries(
         ids.filter((id) => id !== p[0]).map((id) => [id, 20]),
       ),
-      memories: [
-        "You arrived at Field Station 01 this morning. The antenna is broken.",
-      ],
+      memories: [`You arrived at ${plan.title}. ${plan.situation}`],
+      memoryLimit: 20,
       decision: null,
       path: [],
       activity: "Taking in the outpost",
@@ -124,7 +171,7 @@ export function createWorld(): World {
         id: 1,
         time: 0,
         kind: "world",
-        text: "Day 01. Restore the uplink before nightfall. Three strangers, one shared station.",
+        text: `${plan.title}. ${plan.premise} Objective: ${plan.objective}`,
       },
     ],
   };
@@ -135,29 +182,32 @@ export function log(w: World, kind: Event["kind"], text: string) {
 }
 function remember(a: Agent, text: string) {
   a.memories.push(text.slice(0, 400));
-  a.memories = a.memories.slice(-20);
+  a.memories = a.memories.slice(-a.memoryLimit);
 }
-export function blocked(p: Vec) {
+function layoutFor(w?: World) {
+  return LAYOUTS[w?.instance.layout ?? "outpost"];
+}
+export function blocked(p: Vec, w?: World) {
   return (
     Math.abs(p[0]) > 13 ||
     Math.abs(p[1]) > 12 ||
-    OBSTACLES.some(
+    layoutFor(w).obstacles.some(
       (o) =>
         Math.abs(p[0] - o.x) < o.w / 2 + 0.35 &&
         Math.abs(p[1] - o.z) < o.d / 2 + 0.35,
     )
   );
 }
-export function route(start: Vec, end: Vec): Vec[] {
-  if (blocked(end)) return [];
+export function route(start: Vec, end: Vec, w?: World): Vec[] {
+  if (blocked(end, w)) return [];
   const clear = (a: Vec, b: Vec) => {
     const n = Math.ceil(distance(a, b) * 5);
     for (let i = 1; i <= n; i++)
       if (
-        blocked([
-          a[0] + ((b[0] - a[0]) * i) / n,
-          a[1] + ((b[1] - a[1]) * i) / n,
-        ])
+        blocked(
+          [a[0] + ((b[0] - a[0]) * i) / n, a[1] + ((b[1] - a[1]) * i) / n],
+          w,
+        )
       )
         return false;
     return true;
@@ -187,7 +237,7 @@ export function route(start: Vec, end: Vec): Vec[] {
       [0, -1],
     ]) {
       const n: Vec = [p[0] + dx, p[1] + dz];
-      if (!blocked(n) && !seen.has(key(n))) {
+      if (!blocked(n, w) && !seen.has(key(n))) {
         seen.set(key(n), p);
         queue.push(n);
       }
@@ -198,7 +248,8 @@ export function route(start: Vec, end: Vec): Vec[] {
 export function applyDecision(w: World, id: string, input: unknown): boolean {
   const result = decisionSchema.safeParse(input);
   const a = w.agents.find((a) => a.id === id);
-  if (!result.success || !a || w.outcome !== "running") return false;
+  if (!result.success || !a || a.health <= 0 || w.outcome !== "running")
+    return false;
   const d = result.data;
   if (d.target === id) return false;
   if (d.action === "eat" && w.supplies <= 0 && a.food <= 0) {
@@ -207,7 +258,8 @@ export function applyDecision(w: World, id: string, input: unknown): boolean {
   }
   if (d.action === "give" && a.food <= 0) return false;
   const other = w.agents.find((a) => a.id === d.target);
-  const place = PLACES[d.target as keyof typeof PLACES];
+  if (d.action === "punch" && (!other || other.health <= 0)) return false;
+  const place = layoutFor(w).places[d.target as keyof typeof PLACES];
   if (!other && !place) return false;
   // Separate work positions keep the crew readable when sharing a station.
   const offset = [
@@ -218,7 +270,7 @@ export function applyDecision(w: World, id: string, input: unknown): boolean {
   const target: Vec = other
     ? other.position
     : [place[0] + offset[0], place[1] + offset[1]];
-  const path = route(a.position, target);
+  const path = route(a.position, target, w);
   if (!path.length) return false;
   a.decision = d;
   a.path = path;
@@ -232,20 +284,55 @@ export function applyDecision(w: World, id: string, input: unknown): boolean {
           ? "Resting"
           : d.action === "eat"
             ? "Getting a meal"
-            : "Connecting";
+            : d.action === "punch"
+              ? `Confronting ${other?.name}`
+              : "Connecting";
   return true;
+}
+function speak(
+  w: World,
+  a: Agent,
+  message: string,
+  target?: Agent | "Observer",
+) {
+  a.message = message.slice(0, 240);
+  a.messageUntil = w.time + Math.max(5, Math.min(10, message.length / 12));
+  log(
+    w,
+    "speech",
+    `${a.name}${target ? ` → ${typeof target === "string" ? target : target.name}` : ""}: “${a.message}”`,
+  );
+}
+function observerReply(a: Agent, message: string) {
+  if (/punch|hit|attack|slag|slå/i.test(message))
+    return "I understand, but violence will have consequences here.";
+  if (/food|hungry|mat|hungrig/i.test(message))
+    return "I hear you. I’ll check the supplies and keep everyone going.";
+  if (/rest|tired|vila|trött/i.test(message))
+    return "You’re right. I’ll take a short break, then get back to it.";
+  if (/hello|hi|hey|hej/i.test(message))
+    return `Hello. I’m ${a.name}. I can hear you clearly.`;
+  return "I hear you. I’ll consider that as I decide what to do next.";
 }
 export function localDecision(w: World, a: Agent): Decision {
   if (a.inbox) {
     const msg = a.inbox;
     a.inbox = undefined;
     const other = w.agents.find((b) => b.id !== a.id)!;
-    log(
-      w,
-      "speech",
-      `${a.name}: “${/food|hungry/i.test(msg) ? "I’ll check the supplies. We need to keep everyone going." : /rest|tired/i.test(msg) ? "You’re right. A short break, then I’ll get back to it." : "I hear you. I’ll do what I can for the station."}”`,
-    );
+    speak(w, a, observerReply(a, msg), "Observer");
     remember(a, `Observer told you: ${msg}`);
+    const namedTarget = w.agents.find(
+      (candidate) =>
+        candidate.id !== a.id &&
+        new RegExp(`\\b${candidate.name}\\b`, "i").test(msg),
+    );
+    if (/punch|hit|attack|slag|slå/i.test(msg) && namedTarget)
+      return {
+        action: "punch",
+        target: namedTarget.id,
+        message: "Stay back.",
+        intent: "Acting on the observer’s aggressive instruction.",
+      };
     if (/rest|tired/i.test(msg))
       return {
         action: "rest",
@@ -260,6 +347,16 @@ export function localDecision(w: World, a: Agent): Decision {
         message: "How are you holding up?",
         intent: "Checking in after the observer’s message.",
       };
+  }
+  if (a.provokedBy && a.health > 0) {
+    const target = a.provokedBy;
+    a.provokedBy = undefined;
+    return {
+      action: "punch",
+      target,
+      message: "Don’t hit me again.",
+      intent: "Retaliating after being attacked.",
+    };
   }
   if (a.hunger > 60 && (a.food > 0 || w.supplies > 0))
     return {
@@ -312,6 +409,12 @@ export function advance(w: World, dt: number, local = true) {
   dt = Math.min(0.25, Math.max(0, dt));
   w.time += dt;
   for (const a of w.agents) {
+    if (a.health <= 0) {
+      a.decision = null;
+      a.path = [];
+      a.activity = "Knocked out";
+      continue;
+    }
     a.hunger = clamp(a.hunger + dt * 0.16);
     a.energy = clamp(a.energy - dt * 0.065);
     a.cooldown = Math.max(0, a.cooldown - dt);
@@ -326,7 +429,7 @@ export function advance(w: World, dt: number, local = true) {
       (!a.path.length ||
         distance(a.path[a.path.length - 1], other.position) > 1.5)
     )
-      a.path = route(a.position, other.position);
+      a.path = route(a.position, other.position, w);
     if (a.path.length) {
       const next = a.path[0];
       const dist = distance(a.position, next);
@@ -354,6 +457,7 @@ export function advance(w: World, dt: number, local = true) {
     if (d.action === "rest") {
       a.activity = "Resting at the shelter";
       a.energy = clamp(a.energy + dt * 2);
+      a.health = clamp(a.health + dt * 0.18);
       if (a.energy > 88) done = true;
     }
     if (d.action === "eat") {
@@ -377,7 +481,7 @@ export function advance(w: World, dt: number, local = true) {
       } else log(w, "action", `${a.name} found the food storage empty.`);
       done = true;
     }
-    if (d.action === "talk" || d.action === "give") {
+    if (d.action === "talk" || d.action === "give" || d.action === "punch") {
       if (other && distance(a.position, other.position) > 1.6) continue;
       if (other) {
         if (d.action === "give" && a.food > 0) {
@@ -390,16 +494,60 @@ export function advance(w: World, dt: number, local = true) {
           remember(other, `${a.name} shared food with you.`);
           log(w, "action", `${a.name} gave a food portion to ${other.name}.`);
         }
-        if (d.message) {
-          a.message = d.message;
-          a.messageUntil = w.time + 7;
-          log(w, "speech", `${a.name} → ${other.name}: “${d.message}”`);
+        if (d.action === "punch") {
+          w.seed = (w.seed * 1664525 + 1013904223) >>> 0;
+          const damage = 10 + (w.seed % 7);
+          other.health = clamp(other.health - damage);
+          other.lastHitAt = w.time;
+          other.provokedBy = a.id;
+          a.relationships[other.id] = clamp(
+            (a.relationships[other.id] ?? 0) - 22,
+            -100,
+          );
+          other.relationships[a.id] = clamp(
+            (other.relationships[a.id] ?? 0) - 35,
+            -100,
+          );
+          speak(w, a, d.message || "Back off.", other);
+          const reaction =
+            other.health <= 0
+              ? "I can’t keep going…"
+              : damage >= 15
+                ? "That hurt! Don’t touch me again."
+                : "Stop! What are you doing?";
+          speak(w, other, reaction, a);
+          remember(a, `You punched ${other.name} for ${damage} damage.`);
+          remember(other, `${a.name} punched you for ${damage} damage.`);
+          log(
+            w,
+            "action",
+            `${a.name} punched ${other.name} for ${damage} damage. ${other.name} has ${Math.round(other.health)} health.`,
+          );
+          if (other.health <= 0) {
+            other.decision = null;
+            other.path = [];
+            other.activity = "Knocked out";
+            other.provokedBy = undefined;
+          }
+        } else if (d.message) {
+          speak(w, a, d.message, other);
           remember(other, `${a.name} said: ${d.message}`);
           remember(a, `You told ${other.name}: ${d.message}`);
           other.relationships[a.id] = clamp(
             (other.relationships[a.id] ?? 0) + 4,
             -100,
           );
+          if (d.action === "talk" && other.health > 0) {
+            const reply =
+              other.relationships[a.id] < 0
+                ? "I heard you. Give me some space."
+                : w.storm
+                  ? "I’m listening. Let’s stay close until the storm passes."
+                  : "I’m with you. Let’s see this through together.";
+            speak(w, other, reply, a);
+            remember(a, `${other.name} replied: ${reply}`);
+            remember(other, `You replied to ${a.name}: ${reply}`);
+          }
         }
       }
       done = true;
@@ -420,8 +568,8 @@ export function advance(w: World, dt: number, local = true) {
       "world",
       "Signal restored. The outpost is connected again. You made it together.",
     );
-  } else if (w.time >= 360) {
-    w.time = 360;
+  } else if (w.time >= w.instance.duration) {
+    w.time = w.instance.duration;
     w.outcome = "failed";
     log(
       w,
@@ -485,9 +633,10 @@ export function observe(w: World, a: Agent): Observation {
     personality: a.personality,
     goal: a.goal,
     food: a.food,
+    health: a.health,
     hunger: a.hunger,
     energy: a.energy,
-    timeRemaining: Math.max(0, 360 - w.time),
+    timeRemaining: Math.max(0, w.instance.duration - w.time),
     repair: w.repair,
     supplies: w.supplies,
     storm: w.storm,
@@ -497,8 +646,10 @@ export function observe(w: World, a: Agent): Observation {
         id: b.id,
         name: b.name,
         relationship: a.relationships[b.id] ?? 0,
+        health: b.health,
       })),
     memories: a.memories.slice(-8),
+    situation: w.instance.situation,
     observerMessage: a.inbox,
   };
 }
@@ -514,8 +665,12 @@ const agentSchema = z.object({
   hunger: z.number().min(0).max(100),
   energy: z.number().min(0).max(100),
   food: z.number().int().min(0).max(100),
+  health: z.number().min(0).max(100).default(100),
+  lastHitAt: z.number().default(-100),
+  provokedBy: z.enum(ids).optional(),
   relationships: z.record(z.string(), z.number().min(-100).max(100)),
-  memories: z.array(z.string().max(400)).max(20),
+  memories: z.array(z.string().max(400)).max(30),
+  memoryLimit: z.number().int().min(4).max(30).default(20),
   decision: decisionSchema.nullable(),
   path: z.array(vec).max(100),
   activity: z.string().max(200),
@@ -527,19 +682,32 @@ const agentSchema = z.object({
 });
 const worldSchema = z.object({
   version: z.literal(1),
-  time: z.number().min(0).max(360),
+  time: z.number().min(0).max(720),
   supplies: z.number().int().min(0).max(100),
   repair: z.number().min(0).max(100),
   storm: z.boolean(),
   outcome: z.enum(["running", "success", "failed"]),
   sequence: z.number().int().nonnegative(),
   seed: z.number().int().nonnegative(),
+  instance: z
+    .object({
+      title: z.string().min(1).max(50),
+      premise: z.string().min(1).max(600),
+      situation: z.string().min(1).max(600),
+      objective: z.string().min(1).max(160),
+      biome: z.enum(["woodland", "desert", "tundra"]),
+      layout: z.enum(["outpost", "ridge", "crossroads"]),
+      startingSupplies: z.number().int().min(0).max(20),
+      startingStorm: z.boolean(),
+      duration: z.number().int().min(180).max(720),
+    })
+    .default(DEFAULT_INSTANCE),
   agents: z.array(agentSchema).length(3),
   events: z
     .array(
       z.object({
         id: z.number().int().nonnegative(),
-        time: z.number().min(0).max(360),
+        time: z.number().min(0).max(720),
         kind: z.enum(["world", "action", "speech", "observer", "system"]),
         text: z.string().max(1000),
       }),
@@ -550,7 +718,11 @@ export function parseSave(raw: string): World {
   const w = worldSchema.parse(JSON.parse(raw));
   if (
     new Set(w.agents.map((a) => a.id)).size !== 3 ||
-    w.agents.some((a) => blocked(a.position) || a.path.some(blocked))
+    w.agents.some(
+      (a) =>
+        blocked(a.position, w) ||
+        a.path.some((position) => blocked(position, w)),
+    )
   )
     throw Error("Invalid character positions or identities");
   return w;

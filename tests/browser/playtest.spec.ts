@@ -24,6 +24,9 @@ test("observer can inspect, intervene, converse, save, restore and change speed"
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByRole("button", { name: "Resume simulation" }).click();
   await expect(
+    page.getByText(/short break, then get back to it/i),
+  ).toBeVisible();
+  await expect(
     page.getByText("Taking the observer’s advice to rest.", { exact: false }),
   ).toBeVisible();
   await page.screenshot({ path: "artifacts/character-inspection.png" });
@@ -50,6 +53,96 @@ test("observer can inspect, intervene, converse, save, restore and change speed"
   await expect(page.getByText(/Observer → Mira/)).toBeVisible();
   await page.screenshot({ path: "artifacts/event-journal.png" });
   expect(errors).toEqual([]);
+});
+
+test("real-time voices speak visible NPC replies when enabled", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const spoken: string[] = [];
+    Object.defineProperty(window, "__spoken", { value: spoken });
+    Object.defineProperty(window, "speechSynthesis", {
+      configurable: true,
+      value: {
+        getVoices: () => [],
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        speak: (utterance: { text: string }) => spoken.push(utterance.text),
+      },
+    });
+    Object.defineProperty(window, "SpeechSynthesisUtterance", {
+      configurable: true,
+      value: class {
+        text: string;
+        rate = 1;
+        voice = null;
+        constructor(text: string) {
+          this.text = text;
+        }
+      },
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pause simulation" }).click();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+  await page.getByLabel("Speak new dialogue aloud").check();
+  await page.getByRole("button", { name: "Close panel" }).click();
+  await page.getByRole("button", { name: "Characters 03" }).click();
+  await page.getByRole("button", { name: /Mira The engineer/ }).click();
+  await page.getByLabel("SPEAK TO MIRA").fill("Hello Mira");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByRole("button", { name: "Resume simulation" }).click();
+  await expect(
+    page.getByText("Hello. I’m Mira. I can hear you clearly."),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as unknown as { __spoken: string[] }).__spoken.join(" "),
+      ),
+    )
+    .toContain("I can hear you clearly");
+});
+
+test("AI world prompt creates a validated compact instance", async ({
+  page,
+}) => {
+  await page.route("**/api/world/generate", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        instance: {
+          title: "Ice Relay",
+          premise: "Three researchers hold a remote polar relay.",
+          situation: "A whiteout surrounds the damaged radio mast.",
+          objective: "Restore the polar relay.",
+          biome: "tundra",
+          layout: "ridge",
+          startingSupplies: 5,
+          startingStorm: true,
+          duration: 300,
+        },
+      }),
+    });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pause simulation" }).click();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+  await page
+    .getByLabel("OpenRouter API key")
+    .fill(["sk-or-v1", "browser-test-key-1234567890"].join("-"));
+  await page
+    .getByLabel("World description")
+    .fill("Create a small polar communications outpost in a whiteout.");
+  await page.getByRole("button", { name: "Create new instance" }).click();
+  await expect(
+    page.getByText("Ice Relay created and paused for review."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Restore the polar relay." }),
+  ).toBeVisible();
+  await expect(page.getByText(/TUNDRA · RIDGE/)).toBeVisible();
 });
 test("mobile keeps tools usable and rejects invalid imports without losing the world", async ({
   page,
@@ -141,4 +234,45 @@ test("observer can orbit the camera while paused and reset its view", async ({
   await expect(
     page.getByText("SIMULATION PAUSED", { exact: true }),
   ).toBeVisible();
+});
+
+test("OpenRouter key can be entered, hidden, retained for the tab, and cleared", async ({
+  page,
+}) => {
+  const testKey = ["sk-or-v1", "browser-test-key-1234567890"].join("-");
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pause simulation" }).click();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+
+  const keyField = page.getByLabel("OpenRouter API key");
+  const openRouterMode = page.getByRole("button", { name: "OpenRouter" });
+  await expect(keyField).toHaveAttribute("type", "password");
+  await expect(openRouterMode).toBeDisabled();
+
+  await keyField.fill(testKey);
+  await expect(openRouterMode).toBeEnabled();
+  await expect(
+    page.getByText("Stored only for this browser tab session"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Show API key" }).click();
+  await expect(keyField).toHaveAttribute("type", "text");
+  await openRouterMode.click();
+  await expect(openRouterMode).toHaveClass(/active/);
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("sim-proj1-openrouter-key"),
+    ),
+  ).toBe(testKey);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Connection settings" }).click();
+  await expect(page.getByLabel("OpenRouter API key")).toHaveValue(testKey);
+  await page.getByRole("button", { name: "Clear API key" }).click();
+  await expect(page.getByLabel("OpenRouter API key")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "OpenRouter" })).toBeDisabled();
+  expect(
+    await page.evaluate(() =>
+      sessionStorage.getItem("sim-proj1-openrouter-key"),
+    ),
+  ).toBeNull();
 });

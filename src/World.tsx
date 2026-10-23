@@ -3,7 +3,7 @@ import { ContactShadows, Html, OrbitControls } from "@react-three/drei";
 import { Component, Suspense, useRef, type ReactNode } from "react";
 import * as THREE from "three";
 import type { OrbitControls as OrbitImpl } from "three-stdlib";
-import { OBSTACLES, type Agent, type World } from "./engine";
+import { LAYOUTS, type Agent, type World } from "./engine";
 const sand = "#b7b6a0",
   dark = "#3c5145",
   wall = "#d5d6b7";
@@ -93,14 +93,20 @@ function Habitat({
     </group>
   );
 }
-function Antenna({ repair }: { repair: number }) {
+function Antenna({
+  repair,
+  position,
+}: {
+  repair: number;
+  position: [number, number];
+}) {
   const dish = useRef<THREE.Group>(null);
   useFrame(({ clock }) => {
     if (dish.current && repair >= 100)
       dish.current.rotation.y = Math.sin(clock.elapsedTime * 0.3) * 0.3;
   });
   return (
-    <group position={[0, 0, -7]}>
+    <group position={[position[0], 0, position[1]]}>
       <mesh receiveShadow position={[0, 0.15, 0]}>
         <cylinderGeometry args={[1.65, 1.85, 0.3, 8]} />
         <meshStandardMaterial color="#777f6e" />
@@ -194,6 +200,11 @@ function Character({
     body.current.position.y = moving
       ? Math.abs(Math.sin(clock.elapsedTime * 8)) * 0.055
       : Math.sin(clock.elapsedTime * 2) * 0.015;
+    const hit = time - agent.lastHitAt < 0.8;
+    body.current.rotation.z = hit
+      ? Math.sin(clock.elapsedTime * 28) * 0.12
+      : THREE.MathUtils.lerp(body.current.rotation.z, 0, 0.18);
+    body.current.scale.setScalar(agent.health <= 0 ? 0.92 : 1);
     last.current.copy(target);
   });
   return (
@@ -218,7 +229,9 @@ function Character({
       <group ref={body}>
         <mesh castShadow position={[0, 0.69, 0]}>
           <capsuleGeometry args={[0.22, 0.4, 4, 8]} />
-          <meshStandardMaterial color={agent.color} />
+          <meshStandardMaterial
+            color={time - agent.lastHitAt < 0.8 ? "#d65d4c" : agent.color}
+          />
         </mesh>
         <mesh castShadow position={[0, 1.17, 0]}>
           <sphereGeometry args={[0.2, 12, 12]} />
@@ -271,16 +284,24 @@ function Character({
     </group>
   );
 }
-function Environment() {
+function Environment({ world }: { world: World }) {
+  const layout = LAYOUTS[world.instance.layout];
+  const palette = {
+    woodland: { outer: "#9da58b", island: sand, path: "#c6c7ae" },
+    desert: { outer: "#c4aa7c", island: "#d5bd91", path: "#e4cfaa" },
+    tundra: { outer: "#b8c7c5", island: "#d9ded5", path: "#ecede4" },
+  }[world.instance.biome];
+  const supplies = layout.places.supplies;
+  const shelter = layout.places.shelter;
   return (
     <>
       <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
         <planeGeometry args={[200, 200]} />
-        <meshStandardMaterial color="#9da58b" />
+        <meshStandardMaterial color={palette.outer} />
       </mesh>
       <mesh position={[0, -0.34, 0]} receiveShadow>
         <cylinderGeometry args={[16, 17, 0.7, 64]} />
-        <meshStandardMaterial color={sand} />
+        <meshStandardMaterial color={palette.island} />
       </mesh>
       <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <ringGeometry args={[13.4, 13.46, 100]} />
@@ -289,13 +310,17 @@ function Environment() {
       <Box
         position={[0, 0.045, -2.3]}
         scale={[2.6, 0.07, 8.5]}
-        color="#c6c7ae"
+        color={palette.path}
       />
-      <Box position={[0, 0.04, 3.2]} scale={[12, 0.07, 2]} color="#c6c7ae" />
-      {OBSTACLES.map((o, i) => (
+      <Box
+        position={[0, 0.04, 3.2]}
+        scale={[12, 0.07, 2]}
+        color={palette.path}
+      />
+      {layout.obstacles.map((o, i) => (
         <Habitat key={i} {...o} index={i} />
       ))}
-      <group position={[-5, 0, 3]}>
+      <group position={[supplies[0], 0, supplies[1]]}>
         {[0, 1, 2].map((i) => (
           <Box
             key={i}
@@ -308,7 +333,7 @@ function Environment() {
           <span className="world-label">SUPPLIES</span>
         </Html>
       </group>
-      <group position={[6, 0, 4]}>
+      <group position={[shelter[0], 0, shelter[1]]}>
         <Box position={[0, 0.15, 0]} scale={[3, 0.3, 2.6]} color="#8d957b" />
         {[-1, 1].map((i) => (
           <Box
@@ -524,8 +549,11 @@ export default function WorldView({
           shadow-bias={-0.001}
         />
         <Suspense fallback={null}>
-          <Environment />
-          <Antenna repair={world.repair} />
+          <Environment world={world} />
+          <Antenna
+            repair={world.repair}
+            position={LAYOUTS[world.instance.layout].places.antenna}
+          />
           {world.agents.map((a) => (
             <Character
               key={a.id}

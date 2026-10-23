@@ -95,8 +95,62 @@ test("intervention messages persist and change a character’s next action", () 
   assert.equal(w.agents[0].decision?.action, "rest");
   assert.ok(w.agents[0].memories.some((m) => m.includes("Please rest now")));
   assert.ok(w.events.some((e) => e.kind === "observer"));
+  assert.match(w.agents[0].message, /right|hear|Hello/i);
+  assert.ok(w.agents[0].messageUntil > w.time);
+  assert.ok(
+    w.events.some((e) => e.kind === "speech" && e.text.includes("→ Observer")),
+  );
   intervene(w, "food");
   assert.equal(w.supplies, 12);
+});
+test("punching causes damage, breaks trust, and provokes a response", () => {
+  const w = createWorld();
+  const [attacker, target] = w.agents;
+  attacker.position = [0, 0];
+  target.position = [0.5, 0];
+  const trust = target.relationships[attacker.id];
+  assert.equal(
+    applyDecision(w, attacker.id, {
+      action: "punch",
+      target: target.id,
+      message: "Back off.",
+      intent: "Starting a fight.",
+    }),
+    true,
+  );
+  for (let i = 0; i < 20; i++) advance(w, 0.1, false);
+  assert.ok(target.health < 100);
+  assert.ok(target.relationships[attacker.id] < trust);
+  assert.equal(target.provokedBy, attacker.id);
+  assert.ok(target.messageUntil > w.time);
+  assert.ok(w.events.some((e) => e.text.includes("damage")));
+});
+test("observer can tell a character to punch a named character", () => {
+  const w = createWorld();
+  intervene(w, "message", "mira", "Punch Oren");
+  advance(w, 0.1);
+  assert.equal(w.agents[0].decision?.action, "punch");
+  assert.equal(w.agents[0].decision?.target, "oren");
+});
+test("generated instance settings define scenario bounds", () => {
+  const w = createWorld({
+    title: "Ice Relay",
+    premise: "A stranded relay crew waits in whiteout conditions.",
+    situation: "The relay is down while a storm closes in.",
+    objective: "Restore the polar relay.",
+    biome: "tundra",
+    layout: "ridge",
+    startingSupplies: 3,
+    startingStorm: true,
+    duration: 240,
+  });
+  assert.equal(w.instance.title, "Ice Relay");
+  assert.equal(w.supplies, 3);
+  assert.equal(w.storm, true);
+  assert.equal(observe(w, w.agents[0]).timeRemaining, 240);
+  w.time = 239.9;
+  advance(w, 0.2, false);
+  assert.equal(w.outcome, "failed");
 });
 test("food sharing transfers inventory and records trust and memory", () => {
   const w = createWorld();

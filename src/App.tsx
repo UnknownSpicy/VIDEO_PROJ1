@@ -8,6 +8,8 @@ import {
   Compass,
   Crosshair,
   Download,
+  Eye,
+  EyeOff,
   Flag,
   Leaf,
   MessageSquare,
@@ -18,8 +20,11 @@ import {
   RotateCcw,
   Send,
   Settings2,
+  Sparkles,
   Sun,
+  Trash2,
   Upload,
+  Volume2,
   Users,
   X,
 } from "lucide-react";
@@ -36,8 +41,15 @@ import {
   parseSave,
   type World,
 } from "./engine";
-import { decisionSchema } from "./contracts";
+import { decisionSchema, instancePlanSchema } from "./contracts";
 const SAVE_KEY = "sim-proj1-world-v1";
+const OPENROUTER_SESSION_KEY = "sim-proj1-openrouter-key";
+const VOICE_KEY = "sim-proj1-voice-settings";
+type VoiceSettings = {
+  enabled: boolean;
+  rate: number;
+  voices: Record<string, string>;
+};
 type Panel = "agents" | "intervene" | "journal" | "settings" | null;
 export default function App() {
   const world = useRef<World>(createWorld());
@@ -51,10 +63,39 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [notice, setNotice] = useState("");
   const [configured, setConfigured] = useState(false);
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      return sessionStorage.getItem(OPENROUTER_SESSION_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+  const [showApiKey, setShowApiKey] = useState(false);
   const [mode, setMode] = useState<"local" | "live">("local");
   const [model, setModel] = useState("openai/gpt-4o-mini");
   const [thinking, setThinking] = useState<string | null>(null);
   const [aiError, setAiError] = useState("");
+  const [worldPrompt, setWorldPrompt] = useState(
+    "A small isolated research habitat where three people must restore communications before nightfall.",
+  );
+  const [generatingWorld, setGeneratingWorld] = useState(false);
+  const [contextAgent, setContextAgent] = useState("mira");
+  const [availableVoices, setAvailableVoices] = useState<
+    SpeechSynthesisVoice[]
+  >([]);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(() => {
+    try {
+      return (
+        JSON.parse(localStorage.getItem(VOICE_KEY) || "null") || {
+          enabled: false,
+          rate: 1,
+          voices: {},
+        }
+      );
+    } catch {
+      return { enabled: false, rate: 1, voices: {} };
+    }
+  });
   const [saveExists, setSaveExists] = useState(() => {
     try {
       return !!localStorage.getItem(SAVE_KEY);
@@ -70,6 +111,7 @@ export default function App() {
     liveEnabled = useRef(false);
   const lastAi = useRef(0);
   const lastEvent = useRef<HTMLDivElement>(null);
+  const spokenUntil = useRef<Record<string, number>>({});
   const fileInput = useRef<HTMLInputElement>(null);
   // Stop simulation synchronously: React effects can run after the next frame.
   const setPaused = (value: boolean | ((previous: boolean) => boolean)) => {
@@ -81,6 +123,19 @@ export default function App() {
   const refresh = () => setSnapshot({ ...world.current });
   const notify = (text: string) => {
     setNotice(text);
+  };
+  const updateApiKey = (value: string) => {
+    const next = value.trim();
+    setApiKey(next);
+    generation.current++;
+    try {
+      if (next) sessionStorage.setItem(OPENROUTER_SESSION_KEY, next);
+      else sessionStorage.removeItem(OPENROUTER_SESSION_KEY);
+    } catch {
+      // The key still works for the current page when session storage is blocked.
+    }
+    if (!next && !configured) setMode("local");
+    setAiError("");
   };
   useEffect(() => {
     fetch("/api/status")
@@ -95,6 +150,40 @@ export default function App() {
         ),
       );
   }, []);
+  useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    const load = () => setAvailableVoices(window.speechSynthesis.getVoices());
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () =>
+      window.speechSynthesis.removeEventListener("voiceschanged", load);
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(VOICE_KEY, JSON.stringify(voiceSettings));
+    } catch {
+      // Voice choices still work for the current page.
+    }
+  }, [voiceSettings]);
+  useEffect(() => {
+    if (!voiceSettings.enabled || !("speechSynthesis" in window)) return;
+    for (const a of snapshot.agents) {
+      if (
+        !a.message ||
+        a.messageUntil <= snapshot.time ||
+        a.messageUntil <= (spokenUntil.current[a.id] || 0)
+      )
+        continue;
+      spokenUntil.current[a.id] = a.messageUntil;
+      const utterance = new SpeechSynthesisUtterance(a.message);
+      utterance.rate = voiceSettings.rate;
+      const selectedVoice = availableVoices.find(
+        (voice) => voice.name === voiceSettings.voices[a.id],
+      );
+      if (selectedVoice) utterance.voice = selectedVoice;
+      window.speechSynthesis.speak(utterance);
+    }
+  }, [snapshot.sequence, snapshot.time, voiceSettings, availableVoices]);
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => setNotice(""), 5000);
@@ -158,7 +247,10 @@ export default function App() {
       try {
         const res = await fetch("/api/decide", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(apiKey ? { "X-OpenRouter-Key": apiKey } : {}),
+          },
           body: JSON.stringify({ model, observation: observe(w, agent) }),
           signal: AbortSignal.timeout(23000),
         });
@@ -175,6 +267,16 @@ export default function App() {
           throw Error(
             "The requested action is not possible right now. Local behavior will continue.",
           );
+        if (capturedInbox) {
+          const reply =
+            d.message.trim() ||
+            "I hear you. I’ll keep that in mind as I decide what to do.";
+          agent.message = reply;
+          agent.messageUntil =
+            w.time + Math.max(5, Math.min(10, reply.length / 12));
+          log(w, "speech", `${agent.name} → Observer: “${reply}”`);
+          if (agent.decision) agent.decision.message = "";
+        }
         agent.inbox = undefined;
         setAiError("");
         log(w, "system", `${agent.name} chose to ${d.action} · OpenRouter`);
@@ -192,7 +294,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(timer);
-  }, [mode, paused, model]);
+  }, [mode, paused, model, apiKey]);
   useEffect(() => {
     lastEvent.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [snapshot.sequence, panel]);
@@ -294,6 +396,64 @@ export default function App() {
     refresh();
     notify("A new day begins.");
   };
+  const generateWorld = async () => {
+    if (!providerReady || worldPrompt.trim().length < 10) return;
+    setGeneratingWorld(true);
+    setAiError("");
+    try {
+      const res = await fetch("/api/world/generate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "X-OpenRouter-Key": apiKey } : {}),
+        },
+        body: JSON.stringify({ model, prompt: worldPrompt.trim() }),
+        signal: AbortSignal.timeout(28000),
+      });
+      const data = await res.json();
+      if (!res.ok) throw Error(data.error || "World generation failed.");
+      const instance = instancePlanSchema.parse(data.instance);
+      generation.current++;
+      world.current = createWorld(instance);
+      spokenUntil.current = {};
+      setSelected(null);
+      setResultHidden(false);
+      setPaused(true);
+      refresh();
+      notify(`${instance.title} created and paused for review.`);
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : "World generation failed.");
+    } finally {
+      setGeneratingWorld(false);
+    }
+  };
+  const updateSituation = (value: string) => {
+    world.current.instance.situation = value.slice(0, 600);
+    generation.current++;
+    refresh();
+  };
+  const updateCharacter = (
+    id: string,
+    field: "personality" | "goal" | "memories" | "memoryLimit",
+    value: string | number,
+  ) => {
+    const target = world.current.agents.find(
+      (candidate) => candidate.id === id,
+    );
+    if (!target) return;
+    if (field === "memories")
+      target.memories = String(value)
+        .split("\n")
+        .map((item) => item.trim().slice(0, 400))
+        .filter(Boolean)
+        .slice(-target.memoryLimit);
+    else if (field === "memoryLimit") {
+      target.memoryLimit = Math.max(4, Math.min(30, Number(value)));
+      target.memories = target.memories.slice(-target.memoryLimit);
+    } else target[field] = String(value).slice(0, field === "goal" ? 300 : 500);
+    generation.current++;
+    refresh();
+  };
   const send = () => {
     if (!message.trim() || !selected) return;
     generation.current++;
@@ -308,6 +468,10 @@ export default function App() {
   };
   const agent = snapshot.agents.find((a) => a.id === selected);
   const ended = snapshot.outcome !== "running";
+  const sessionKeyReady = apiKey.startsWith("sk-or-") && apiKey.length >= 24;
+  const providerReady = configured || sessionKeyReady;
+  const editableAgent = snapshot.agents.find((a) => a.id === contextAgent)!;
+  const speechSupported = "speechSynthesis" in window;
   return (
     <main className="app">
       <div className="world">
@@ -349,7 +513,7 @@ export default function App() {
           </span>
           <div>
             <div className="eyebrow">SHARED OBJECTIVE</div>
-            <h1>Bring the station back online.</h1>
+            <h1>{snapshot.instance.objective}</h1>
           </div>
         </div>
         <div className="mission-progress">
@@ -362,18 +526,18 @@ export default function App() {
             <small>%</small>
           </strong>
           <span className="deadline">
-            <Sun size={13} /> BEFORE 18:00
+            <Sun size={13} /> BEFORE {clock(snapshot.instance.duration)}
           </span>
         </div>
       </section>
       <aside className="world-stamp">
-        <span className="eyebrow">EXPERIMENT 001</span>
-        <span className="station-name">
-          A small world.
-          <br />A shared tomorrow.
-        </span>
+        <span className="eyebrow">{snapshot.instance.title}</span>
+        <span className="station-name">{snapshot.instance.premise}</span>
         <span className="stamp-rule" />
-        <span className="eyebrow">3 CHARACTERS · 1 OUTPOST</span>
+        <span className="eyebrow">
+          3 CHARACTERS · {snapshot.instance.biome.toUpperCase()} ·{" "}
+          {snapshot.instance.layout.toUpperCase()}
+        </span>
       </aside>
       <div className="compass">
         <Compass size={28} strokeWidth={1} />
@@ -551,6 +715,12 @@ export default function App() {
                     </div>
                   </div>
                   <div className="vitals">
+                    <label>
+                      Health <strong>{Math.round(agent.health)}%</strong>
+                    </label>
+                    <div className="meter health">
+                      <i style={{ width: `${agent.health}%` }} />
+                    </div>
                     <label>
                       Energy <strong>{Math.round(agent.energy)}%</strong>
                     </label>
@@ -746,6 +916,38 @@ export default function App() {
             <>
               <h2>Behind the world.</h2>
               <div className="setting-block">
+                <span className="eyebrow">CREATE AN INSTANCE WITH AI</span>
+                <label htmlFor="world-prompt">World description</label>
+                <textarea
+                  id="world-prompt"
+                  className="settings-textarea"
+                  value={worldPrompt}
+                  maxLength={1200}
+                  rows={5}
+                  onChange={(e) => setWorldPrompt(e.target.value)}
+                  placeholder="Describe the place, situation, objective, atmosphere, and constraints…"
+                />
+                <button
+                  className="generate-world"
+                  disabled={
+                    !providerReady ||
+                    worldPrompt.trim().length < 10 ||
+                    generatingWorld
+                  }
+                  onClick={() => void generateWorld()}
+                >
+                  <Sparkles size={16} />
+                  {generatingWorld
+                    ? "Creating instance…"
+                    : "Create new instance"}
+                </button>
+                <p className="micro">
+                  The model creates a validated plan using one of three compact
+                  layouts and biomes. Creating it starts a new paused world and
+                  replaces unsaved progress.
+                </p>
+              </div>
+              <div className="setting-block">
                 <span className="eyebrow">CHARACTER INTELLIGENCE</span>
                 <div className="mode-switch">
                   <button
@@ -760,16 +962,72 @@ export default function App() {
                   <button
                     className={mode === "live" ? "active" : ""}
                     onClick={() => setMode("live")}
-                    disabled={!configured}
+                    disabled={!providerReady}
                   >
                     OpenRouter
                   </button>
                 </div>
                 <p className="muted">
                   {configured
-                    ? "Server key detected. Live mode makes occasional model decisions while routine actions continue locally."
-                    : "Local mode is ready. To enable live AI, configure OPENROUTER_API_KEY on the server and restart it. Never enter a key in the browser."}
+                    ? "Server key detected. You can also enter a session key below to use it instead."
+                    : sessionKeyReady
+                      ? "Session key ready. OpenRouter mode can now make model decisions."
+                      : "Local mode is ready. Enter an OpenRouter key below to enable live AI."}
                 </p>
+                <label htmlFor="openrouter-key">OpenRouter API key</label>
+                <div className="credential-field">
+                  <input
+                    id="openrouter-key"
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    maxLength={512}
+                    autoComplete="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    onChange={(e) => updateApiKey(e.target.value)}
+                    placeholder="sk-or-v1-…"
+                    aria-describedby="openrouter-key-help"
+                  />
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => setShowApiKey((visible) => !visible)}
+                    aria-label={showApiKey ? "Hide API key" : "Show API key"}
+                  >
+                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                  {apiKey && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      onClick={() => {
+                        updateApiKey("");
+                        setShowApiKey(false);
+                        notify("OpenRouter session key cleared.");
+                      }}
+                      aria-label="Clear API key"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  )}
+                </div>
+                <div
+                  id="openrouter-key-help"
+                  className={
+                    "credential-status " + (sessionKeyReady ? "ready" : "")
+                  }
+                >
+                  <span className="connection-dot" />
+                  <span>
+                    {sessionKeyReady
+                      ? "Stored only for this browser tab session"
+                      : apiKey
+                        ? "Key should begin with sk-or-"
+                        : configured
+                          ? "Using the key configured on the server"
+                          : "No key connected"}
+                  </span>
+                </div>
                 <label htmlFor="model">OpenRouter model</label>
                 <input
                   id="model"
@@ -784,11 +1042,175 @@ export default function App() {
                 <p className="micro">
                   Live mode: at most one decision every 8 seconds, 120
                   requests/hour. Requires account credits. Other actions use
-                  local behavior.
+                  local behavior. Session keys are sent only to this app's
+                  backend and are never included in saves or exports.
                 </p>
                 {aiError && (
                   <p className="inline-error" role="alert">
                     {aiError}
+                  </p>
+                )}
+              </div>
+              <div className="setting-block">
+                <span className="eyebrow">WORLD & CHARACTER CONTEXT</span>
+                <label htmlFor="situation-context">Current situation</label>
+                <textarea
+                  id="situation-context"
+                  className="settings-textarea"
+                  value={snapshot.instance.situation}
+                  maxLength={600}
+                  rows={4}
+                  onChange={(e) => updateSituation(e.target.value)}
+                />
+                <label htmlFor="context-character">Character</label>
+                <select
+                  id="context-character"
+                  value={contextAgent}
+                  onChange={(e) => setContextAgent(e.target.value)}
+                >
+                  {snapshot.agents.map((character) => (
+                    <option key={character.id} value={character.id}>
+                      {character.name}
+                    </option>
+                  ))}
+                </select>
+                <label htmlFor="personality-context">Personality/context</label>
+                <textarea
+                  id="personality-context"
+                  className="settings-textarea"
+                  value={editableAgent.personality}
+                  maxLength={500}
+                  rows={4}
+                  onChange={(e) =>
+                    updateCharacter(
+                      editableAgent.id,
+                      "personality",
+                      e.target.value,
+                    )
+                  }
+                />
+                <label htmlFor="goal-context">Goal</label>
+                <textarea
+                  id="goal-context"
+                  className="settings-textarea"
+                  value={editableAgent.goal}
+                  maxLength={300}
+                  rows={3}
+                  onChange={(e) =>
+                    updateCharacter(editableAgent.id, "goal", e.target.value)
+                  }
+                />
+                <div className="memory-heading">
+                  <label htmlFor="memory-context">Memories, one per line</label>
+                  <label htmlFor="memory-limit">
+                    Limit
+                    <input
+                      id="memory-limit"
+                      type="number"
+                      min={4}
+                      max={30}
+                      value={editableAgent.memoryLimit}
+                      onChange={(e) =>
+                        updateCharacter(
+                          editableAgent.id,
+                          "memoryLimit",
+                          e.target.value,
+                        )
+                      }
+                    />
+                  </label>
+                </div>
+                <textarea
+                  id="memory-context"
+                  className="settings-textarea memories-editor"
+                  value={editableAgent.memories.join("\n")}
+                  rows={7}
+                  onChange={(e) =>
+                    updateCharacter(
+                      editableAgent.id,
+                      "memories",
+                      e.target.value,
+                    )
+                  }
+                />
+                <p className="micro">
+                  Changes apply immediately and are included in local choices,
+                  model observations, saves, and exports.
+                </p>
+              </div>
+              <div className="setting-block">
+                <span className="eyebrow">REAL-TIME CHARACTER VOICES</span>
+                {speechSupported ? (
+                  <>
+                    <label className="toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={voiceSettings.enabled}
+                        onChange={(e) =>
+                          setVoiceSettings((current) => ({
+                            ...current,
+                            enabled: e.target.checked,
+                          }))
+                        }
+                      />
+                      <Volume2 size={16} /> Speak new dialogue aloud
+                    </label>
+                    <label htmlFor="voice-rate">
+                      Speech rate · {voiceSettings.rate.toFixed(1)}×
+                    </label>
+                    <input
+                      id="voice-rate"
+                      type="range"
+                      min="0.7"
+                      max="1.4"
+                      step="0.1"
+                      value={voiceSettings.rate}
+                      onChange={(e) =>
+                        setVoiceSettings((current) => ({
+                          ...current,
+                          rate: Number(e.target.value),
+                        }))
+                      }
+                    />
+                    {snapshot.agents.map((character) => (
+                      <div className="voice-row" key={character.id}>
+                        <label htmlFor={`voice-${character.id}`}>
+                          {character.name}
+                        </label>
+                        <select
+                          id={`voice-${character.id}`}
+                          value={voiceSettings.voices[character.id] || ""}
+                          onChange={(e) =>
+                            setVoiceSettings((current) => ({
+                              ...current,
+                              voices: {
+                                ...current.voices,
+                                [character.id]: e.target.value,
+                              },
+                            }))
+                          }
+                        >
+                          <option value="">Browser default</option>
+                          {availableVoices.map((voice) => (
+                            <option
+                              key={`${voice.name}-${voice.lang}`}
+                              value={voice.name}
+                            >
+                              {voice.name} · {voice.lang}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                    <p className="micro">
+                      Uses the browser’s built-in speech synthesis immediately
+                      when a dialogue bubble appears. Available voices depend on
+                      Windows and your browser; this uses no model credits.
+                    </p>
+                  </>
+                ) : (
+                  <p className="muted">
+                    This browser does not provide real-time speech synthesis.
                   </p>
                 )}
               </div>

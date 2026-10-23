@@ -44,6 +44,71 @@ test("API hides credentials, validates observations and clearly reports missing 
   }
 });
 
+test("a browser session key is forwarded to OpenRouter without being exposed by status", async () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  const browserKey = ["sk-or-v1", "browser-test-key-1234567890"].join("-");
+  let authorization: string | null = null;
+  const provider = async (_input: unknown, init?: RequestInit) => {
+    authorization = new Headers(init?.headers).get("authorization");
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: "repair",
+                target: "antenna",
+                message: "",
+                intent: "Restore the uplink.",
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const server = createApp(provider as typeof fetch).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const status = await (await fetch(`${base}/api/status`)).json();
+    assert.deepEqual(Object.keys(status).sort(), ["configured", "model"]);
+    assert.equal(status.configured, false);
+
+    const w = createWorld();
+    const response = await fetch(`${base}/api/decide`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-OpenRouter-Key": browserKey,
+      },
+      body: JSON.stringify({ observation: observe(w, w.agents[0]) }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(authorization, `Bearer ${browserKey}`);
+
+    const invalid = await fetch(`${base}/api/decide`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-OpenRouter-Key": "not-an-openrouter-key",
+      },
+      body: JSON.stringify({ observation: observe(w, w.agents[0]) }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.match((await invalid.json()).error, /key format/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previous) process.env.OPENROUTER_API_KEY = previous;
+    else delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
 test("provider integration returns a validated decision and rejects malformed model output", async () => {
   const previous = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = "test-only-not-a-real-key";
@@ -127,6 +192,67 @@ test("provider integration returns a validated decision and rejects malformed mo
   } finally {
     bad.closeAllConnections();
     await new Promise<void>((resolve) => bad.close(() => resolve()));
+    if (previous) process.env.OPENROUTER_API_KEY = previous;
+    else delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
+test("world generation returns only a validated bounded instance plan", async () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = "test-only-not-a-real-key";
+  let prompt = "";
+  const provider = async (_input: unknown, init?: RequestInit) => {
+    const payload = JSON.parse(String(init?.body)) as {
+      messages: { content: string }[];
+    };
+    prompt = payload.messages[1].content;
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                title: "Ice Relay",
+                premise: "Three researchers are isolated in a polar relay.",
+                situation: "A whiteout surrounds a damaged radio mast.",
+                objective: "Restore contact before the whiteout peaks.",
+                biome: "tundra",
+                layout: "ridge",
+                startingSupplies: 5,
+                startingStorm: true,
+                duration: 300,
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const server = createApp(provider as typeof fetch).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/world/generate`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "test/model",
+          prompt: "Create a small polar communications outpost.",
+        }),
+      },
+    );
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.equal(data.instance.biome, "tundra");
+    assert.equal(data.instance.layout, "ridge");
+    assert.match(prompt, /polar communications/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previous) process.env.OPENROUTER_API_KEY = previous;
     else delete process.env.OPENROUTER_API_KEY;
   }
