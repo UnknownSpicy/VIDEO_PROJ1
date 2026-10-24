@@ -364,7 +364,7 @@ export default function App() {
     return () => cancelAnimationFrame(frame);
   }, [paused, speed, mode, thinking]);
   useEffect(() => {
-    if (mode !== "live" || paused) return;
+    if (mode !== "live" || paused || connectionTest.state === "testing") return;
     const timer = setInterval(async () => {
       const w = world.current;
       if (
@@ -427,7 +427,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(timer);
-  }, [mode, paused, model, apiKey]);
+  }, [mode, paused, model, apiKey, connectionTest.state]);
   useEffect(() => {
     lastEvent.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [snapshot.sequence, panel]);
@@ -505,6 +505,13 @@ export default function App() {
   };
   const testConnection = async () => {
     if (!providerReady || !model) return;
+    if (model === "openrouter/free") {
+      setConnectionTest({
+        state: "error",
+        text: "Choose a specific model from the Free models list. The automatic free router can change models between requests and is unreliable for simulation actions.",
+      });
+      return;
+    }
     setConnectionTest({ state: "testing", text: "Testing model…" });
     try {
       const response = await fetch("/api/test-connection", {
@@ -1303,6 +1310,13 @@ export default function App() {
                   }}
                   placeholder="provider/model"
                 />
+                {model === "openrouter/free" && (
+                  <p className="model-warning">
+                    <strong>Choose a specific free model.</strong> The automatic
+                    OpenRouter free router can switch models between calls and
+                    may not return valid simulation actions.
+                  </p>
+                )}
                 <div className="connection-actions">
                   <button
                     className="test-connection"

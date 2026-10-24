@@ -311,6 +311,12 @@ test("model catalog supports live search, selection, testing and saved choice", 
   await expect(page.getByLabel("Selected model ID")).toHaveValue(
     "recursive/flint-v1.0:free",
   );
+  await page.getByLabel("Selected model ID").fill("openrouter/free");
+  await expect(page.getByText("Choose a specific free model.")).toBeVisible();
+  await page.getByRole("button", { name: "Test selected model" }).click();
+  await expect(
+    page.getByText(/automatic free router can change models/i),
+  ).toBeVisible();
 });
 
 test("OpenRouter key can be entered, hidden, retained for the tab, and cleared", async ({

@@ -120,12 +120,14 @@ test("provider integration returns a validated decision and rejects malformed mo
         choices: [
           {
             message: {
-              content: JSON.stringify({
-                action: "repair",
-                target: "antenna",
-                message: "",
-                intent: "Get the uplink working.",
-              }),
+              content: `Here is the requested action:\n\`\`\`json\n${JSON.stringify(
+                {
+                  action: "repair",
+                  target: "antenna",
+                  message: "",
+                  intent: "Get the uplink working.",
+                },
+              )}\n\`\`\``,
             },
           },
         ],
@@ -273,6 +275,14 @@ test("model catalog separates compatible free and credit models and connection t
         JSON.stringify({
           data: [
             {
+              id: "openrouter/free",
+              name: "Automatic Free Router",
+              description: "Changes models between requests",
+              context_length: 32000,
+              pricing: { prompt: "0", completion: "0" },
+              supported_parameters: ["response_format"],
+            },
+            {
               id: "example/free:free",
               name: "Example Free",
               description: "A compatible free model",
@@ -342,6 +352,16 @@ test("model catalog separates compatible free and credit models and connection t
     const result = await testResponse.json();
     assert.equal(result.ok, true);
     assert.equal(testedModel, "example/free:free");
+    const immediateRetry = await fetch(`${base}/api/test-connection`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-OpenRouter-Key": browserKey,
+      },
+      body: JSON.stringify({ model: "example/free:free" }),
+    });
+    assert.equal(immediateRetry.status, 429);
+    assert.match((await immediateRetry.json()).error, /seconds/);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
