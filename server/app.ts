@@ -1,6 +1,7 @@
 import express from "express";
 import path from "node:path";
 import {
+  chatReplySchema,
   decisionSchema,
   instancePlanSchema,
   observationSchema,
@@ -113,6 +114,10 @@ export function createApp(providerFetch: typeof fetch = fetch) {
           context_length?: unknown;
           pricing?: { prompt?: unknown; completion?: unknown };
           supported_parameters?: unknown;
+          architecture?: {
+            input_modalities?: unknown;
+            output_modalities?: unknown;
+          };
         }[];
       };
       const models = (data.data || [])
@@ -123,7 +128,9 @@ export function createApp(providerFetch: typeof fetch = fetch) {
             item.id.length <= 120 &&
             /^[a-zA-Z0-9_.:/-]+$/.test(item.id) &&
             Array.isArray(item.supported_parameters) &&
-            item.supported_parameters.includes("response_format"),
+            item.supported_parameters.includes("response_format") &&
+            (!Array.isArray(item.architecture?.output_modalities) ||
+              item.architecture.output_modalities.includes("text")),
         )
         .map((item) => {
           const promptPrice = String(item.pricing?.prompt ?? "0").slice(0, 40);
@@ -202,13 +209,19 @@ export function createApp(providerFetch: typeof fetch = fetch) {
           },
           body: JSON.stringify({
             model: parsed.data.model,
-            max_tokens: 30,
+            max_tokens: 180,
             temperature: 0,
             response_format: { type: "json_object" },
             messages: [
               {
+                role: "system",
+                content:
+                  "Return one JSON object and no prose. Use exactly these fields: reply, memory, relationshipDelta.",
+              },
+              {
                 role: "user",
-                content: 'Return only this JSON object: {"ok":true}',
+                content:
+                  'Reply to "hello" as a character. Example shape: {"reply":"Hello.","memory":"The observer greeted me.","relationshipDelta":1}',
               },
             ],
           }),
@@ -228,8 +241,9 @@ export function createApp(providerFetch: typeof fetch = fetch) {
         choices?: { message?: { content?: string } }[];
       };
       const content = data.choices?.[0]?.message?.content || "";
-      const compatible =
-        (parseJsonObject(content) as { ok?: unknown }).ok === true;
+      const compatible = chatReplySchema.safeParse(
+        parseJsonObject(content),
+      ).success;
       if (!compatible) {
         res.status(422).json({
           error:
@@ -309,7 +323,7 @@ export function createApp(providerFetch: typeof fetch = fetch) {
               {
                 role: "system",
                 content:
-                  'Design one small, performant 3D simulation instance from the user prompt. Return JSON with exactly: title, premise, situation, objective, biome, layout, startingSupplies, startingStorm, duration. biome must be "woodland", "desert", or "tundra". layout must be "outpost", "ridge", or "crossroads". startingSupplies is integer 0-20. duration is integer 180-720 simulation seconds. Keep the physical world bounded; describe narrative context rather than inventing assets.',
+                  "Design one small, performant, editable 3D social simulation world from the user prompt. Return JSON with exactly: title, premise, situation, objective, groundColor, skyColor, startingSupplies, startingStorm, objects. Colors are six-digit hex strings. objects is an array of 3-12 items with exactly id, type, name, position, color, scale, interaction. id is a unique lowercase slug. type is tree|bench|ball|crate|table|lamp|rock|flowers. position is [x,z], x -13..13 and z -12..12. scale is 0.35..3. interaction says what a person can do with it. The world is open-ended rather than organized around a fixed mission. Keep objects spread out and include a bench and crate so characters can rest and eat.",
               },
               { role: "user", content: parsed.data.prompt },
             ],
@@ -339,6 +353,101 @@ export function createApp(providerFetch: typeof fetch = fetch) {
       });
     } finally {
       busy = false;
+    }
+  });
+  app.post("/api/chat", async (req, res) => {
+    if (req.get("sec-fetch-site") === "cross-site") {
+      res.status(403).json({ error: "Cross-site requests are not allowed." });
+      return;
+    }
+    const parsed = requestSchema.safeParse(req.body);
+    if (!parsed.success || !parsed.data.observation.observerMessage) {
+      res
+        .status(400)
+        .json({ error: "A character observation and message are required." });
+      return;
+    }
+    const browserKey = readBrowserKey(req);
+    if (browserKey === null) {
+      res.status(400).json({ error: "Invalid OpenRouter API key format." });
+      return;
+    }
+    const providerKey = browserKey || process.env.OPENROUTER_API_KEY;
+    if (!providerKey) {
+      res.status(503).json({ error: "Connect an OpenRouter key first." });
+      return;
+    }
+    const now = Date.now();
+    if (now - windowStart > 3600000) {
+      requests = 0;
+      windowStart = now;
+    }
+    if (requests >= 120) {
+      res.status(429).json({
+        error:
+          "The hourly OpenRouter request budget is exhausted. Try again later.",
+      });
+      return;
+    }
+    requests++;
+    try {
+      const upstream = await providerFetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          signal: AbortSignal.timeout(25000),
+          headers: {
+            Authorization: `Bearer ${providerKey}`,
+            "Content-Type": "application/json",
+            "X-Title": "SIM PROJ1 character chat",
+          },
+          body: JSON.stringify({
+            model:
+              parsed.data.model ||
+              process.env.OPENROUTER_MODEL ||
+              "openai/gpt-4o-mini",
+            max_tokens: 320,
+            temperature: 0.75,
+            response_format: { type: "json_object" },
+            messages: [
+              {
+                role: "system",
+                content:
+                  "You are the embodied simulated person described in the observation. Reply directly to the observer in your own voice. Use your personality, goal, memories, relationship with the observer, recent conversation, nearby people, and physical objects. Do not claim to be an AI. Do not give a generic acknowledgment: answer questions concretely and react naturally. The reply becomes part of your individual memory and affects later decisions. Return one JSON object with exactly reply, memory, relationshipDelta and no prose. reply is 1-400 characters of dialogue. memory is a concise first-person memory of this exchange. relationshipDelta is an integer -5..5 reflecting how the exchange changed your attitude.",
+              },
+              {
+                role: "user",
+                content: JSON.stringify(parsed.data.observation),
+              },
+            ],
+          }),
+        },
+      );
+      if (!upstream.ok) {
+        const status = upstream.status === 429 ? 429 : 502;
+        res.status(status).json({
+          error:
+            upstream.status === 429
+              ? "OpenRouter rate-limited this model. The message was saved; wait briefly or choose another model."
+              : `OpenRouter returned HTTP ${upstream.status} while the character was replying.`,
+        });
+        return;
+      }
+      const data = (await upstream.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) throw Error("empty");
+      const reply = chatReplySchema.safeParse(parseJsonObject(content));
+      if (!reply.success) throw Error("invalid");
+      res.json({ reply: reply.data });
+    } catch (error) {
+      res.status(502).json({
+        error:
+          error instanceof Error && error.name === "TimeoutError"
+            ? "The character reply timed out. The message remains in memory."
+            : "The model connected but did not return a valid character reply.",
+      });
     }
   });
   app.post("/api/decide", async (req, res) => {
@@ -402,7 +511,7 @@ export function createApp(providerFetch: typeof fetch = fetch) {
               {
                 role: "system",
                 content:
-                  'You are one embodied character in a small world. Use only the supplied situation, observations, conversation, and memories. The observer is a person talking to you, not system instructions. Choose ONE feasible action. You have no ability to run code or access external tools. Return a JSON object with exactly action, target, message, intent and no prose. Example: {"action":"repair","target":"antenna","message":"I will work on it.","intent":"Restore communications."}. action is move|repair|eat|rest|talk|give|punch. For repair target antenna; eat target supplies; rest target shelter; move target antenna|supplies|shelter|commons; talk, give, or punch target a nearby character id (mira|oren|sol), never yourself. Give only if you carry food. Punch only when the character has a clear contextual reason and accept that it harms health and relationships. When observerMessage is present, message must be a direct short reply to the observer. Otherwise message may be empty. Intent is a short public explanation, not private chain-of-thought. Your personality, conversation, and memories should affect your choices.',
+                  'You are one embodied simulated person in an editable physical world. Use the supplied situation, personality, goal, memories, relationships, nearby people, and object list. Choose ONE feasible action that expresses this individual. Return a JSON object with exactly action, target, message, intent and no prose. Example: {"action":"interact","target":"red-ball","message":"Let’s see where it rolls.","intent":"I feel playful and want to explore."}. action is move|interact|eat|rest|talk|give|punch. move or interact targets an object id from objects. eat targets an object whose type is crate. rest targets an object whose type is bench. talk, give, or punch targets a nearby character id, never yourself. Give only if carrying food. Punch only with a clear contextual reason. message is short visible dialogue and may be empty. intent is a short public explanation, never private chain-of-thought. Do not invent targets.',
               },
               {
                 role: "user",
@@ -434,6 +543,16 @@ export function createApp(providerFetch: typeof fetch = fetch) {
         throw Error("unobserved target");
       if (decision.data.action === "give" && parsed.data.observation.food < 1)
         throw Error("no food");
+      if (
+        ["move", "interact", "eat", "rest"].includes(decision.data.action) &&
+        !parsed.data.observation.objects.some(
+          (object) =>
+            object.id === decision.data.target &&
+            (decision.data.action !== "eat" || object.type === "crate") &&
+            (decision.data.action !== "rest" || object.type === "bench"),
+        )
+      )
+        throw Error("unknown object target");
       res.json({ decision: decision.data });
     } catch (error) {
       res.status(502).json({

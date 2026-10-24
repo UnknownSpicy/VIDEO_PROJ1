@@ -1,73 +1,93 @@
-# SIM PROJ1 — Field Station 01
+# SIM PROJ1 — Living Meadow
 
-A playable browser prototype for a small 3D world inhabited by three characters. You are an observer with intervention tools: inspect the crew, talk to them, deliver supplies, change the weather, and watch relationships or conflict develop. The default shared task is to restore the antenna before nightfall.
+A playable browser prototype for an editable 3D world inhabited by three simulated people. You are an observer: talk to each person, edit their individual identity and memory, change the physical world while it runs, use objects, alter the weather, and watch relationships or conflict develop.
+
+The default world is an open green grass field. It has a tree, bench, ball, picnic crate, table, and wildflowers. The simulation is open-ended.
 
 ## Run
 
-Requires **Node.js 24+** and npm. From this checkout:
+Requires **Node.js 24+** and npm. In PowerShell, from the extracted project folder:
 
-```sh
-npm ci --cache /tmp/sim-proj1-npm-cache
+```powershell
+npm install
 npm run dev
 ```
 
-Vite serves the browser app on port **5173** and proxies `/api` to the Node server on port **3001**. Keep both processes running. The startup command respects the environment's configured HTTPS proxy and retains TLS verification. No API key is needed for local mode.
+Open <http://localhost:5173> and keep PowerShell running. Vite proxies `/api` to the Node server on port **3001**. No API key is needed for local mode.
 
-For a production build served by the Node server:
+For a production build served on port 3001:
 
-```sh
+```powershell
 npm run build
 npm start
 ```
 
-The built app is then served on port **3001**. This prototype is intended for a local or access-controlled development environment; add user authentication and per-user budgets before exposing a funded AI endpoint publicly.
+## Simulation and editing
 
-## Play
+- Drag to orbit, scroll to zoom, and right-drag to pan. **R** resets the camera. **Space** pauses or resumes.
+- Click a person or open **Characters** to inspect health, needs, intentions, relationships, memories, and conversation.
+- **Edit this character** changes that NPC’s name, role, personality/context, personal goal, memory limit, and individual memory list. Changes apply immediately. Each NPC keeps a separate chat history, memories, and relationship with the observer.
+- **Edit world** changes the world name, description, shared context, current situation, grass color, and sky color while the simulation runs.
+- The world editor can add, remove, select, rename, recolor, resize, reposition, and change the type of physical objects. Object types are tree, bench, ball, crate, table, lamp, rock, and flowers. Each object has editable interaction text that NPCs receive in their observations.
+- Click a 3D object to open it in the editor. **Interact now** records the observer’s action and adds it to every character’s perception and memory.
+- NPCs can move, use objects, eat, rest, talk, share food, and punch. Objects record how often they have been used. Punches cause damage, reduce trust, enter memory, and can provoke retaliation.
+- **Intervene** adds food or changes the weather. Rain slows movement.
+- Optional voices use browser speech synthesis and require no model credits.
+- Browser saves and exported JSON contain the physical world, individual configurations, memories, chats, relationships, and journal. API keys are excluded.
 
-- Drag to orbit, scroll to zoom, right-drag to pan. **R** resets the camera.
-- **Space** pauses/resumes. Set speed to 1×, 2×, or 4×.
-- Click a character, or open **Characters**, to inspect their needs, intentions, relationships, and memories.
-- Each character inspector has a separate chat interface with timestamped history. Messages and replies also update that NPC's memories and future model context, appear in the journal, and produce conversation bubbles above the speaker. Local mode recognizes basic greetings, food/rest/help requests, and named instructions; it is explicitly not an LLM.
-- Characters can move, repair, eat, rest, talk, share food, and punch. Punches cause damage, reduce trust, enter memories, and can provoke retaliation. A character at zero health is knocked out.
-- **Intervene** delivers food or introduces/clears a storm. Storms slow outdoor repairs and travel.
-- Open **Event journal** to follow conversations and interventions.
-- Settings lets you edit the world's current situation plus each character's personality, goal, memory list, and memory limit. Changes apply immediately, and explicit save buttons persist world context, model choice, world prompt, and voice preferences in browser storage.
-- If OpenRouter is connected, describe a world in the **World description** field. The model produces a validated, compact instance plan: story context, objective, one of three biomes, one of three navigation-tested layouts, supplies, weather, and duration. It cannot generate unrestricted geometry.
-- Optional real-time voices use the browser's built-in speech synthesis. Enable them in settings, assign an installed voice to each NPC, and choose a speech rate. Voice availability and quality depend on Windows and the browser, and use no model credits.
-- Settings provides browser-local save/load and portable JSON export/import. Saves include the instance, simulation, memories, relationships, health, and journal; they do not include keys or voice settings. Imports load paused.
-- The default six-minute simulation day runs from 08:00 to 18:00; generated instances can use a validated three-to-twelve-minute duration. Restore the antenna to win; the deadline closes the experiment. Reset to try another approach.
+## AI chat and autonomous decisions
+
+Local mode is a deterministic simulation with simple rule-based dialogue. Local replies are visibly marked **local**.
+
+OpenRouter mode has two separate AI paths:
+
+1. **Direct character chat** calls `/api/chat` immediately, including while paused. The selected model receives only that NPC’s personality, goal, memories, relationship with you, recent chat, nearby people, current situation, and physical objects. A validated response contains dialogue, one concise memory, and a small relationship change. Successful replies are marked **AI**. A provider or rate-limit error is shown inside the chat instead of being disguised as an NPC answer.
+2. **Background decisions** rotate through characters at most once every 12 real seconds. The model chooses one validated action. Local behavior fills the time between calls and keeps the world moving if a provider request fails.
+
+Direct chat is kept out of the background decision queue, so a message no longer waits for the next autonomous turn. The model’s reply becomes part of that NPC’s own memory and future decision context.
+
+The server validates all output. A decision can use `move`, `interact`, `eat`, `rest`, `talk`, `give`, or `punch`. World code owns movement, inventory, combat, object state, and execution. Models cannot run code or call external tools.
 
 ## Optional OpenRouter connection
 
-Open the in-game settings and enter an OpenRouter key in the masked **OpenRouter API key** field. The key is kept in `sessionStorage` for the current browser tab, sent only to the local app backend, and excluded from world saves and exports. Clear it from settings when finished. Because same-origin browser code can access session storage, a server environment variable remains the safer choice for shared or hosted deployments.
+Enter an OpenRouter key in the masked settings field. The key stays in `sessionStorage` for the current browser tab, goes only to the local backend, and is excluded from saves and exports. Never commit it or paste it into chat.
 
-Alternatively, supply **OPENROUTER_API_KEY** securely through your cloud environment settings, or copy `.env.example` to an ignored `.env` for local development and fill it there. Never put keys in a `VITE_` variable, commit them, or enter them in chat. Restart the API process after changing server configuration.
+You can instead set **OPENROUTER_API_KEY** in an ignored `.env` file or the cloud environment. Optional `OPENROUTER_MODEL` selects the server default.
 
-Optional non-secret setting: `OPENROUTER_MODEL` (default `openai/gpt-4o-mini`). The settings panel loads OpenRouter's current catalog, keeps only models advertising JSON-response support, and separates free models from credit-priced models. Both lists have live search and show matching model IDs; paid options include current input/output prices per million tokens. The unpredictable `openrouter/free` meta-router is omitted because it can switch to an incompatible model between calls; choose a specific free model instead. The selected model can be tested for authentication, availability, and JSON compatibility before enabling **OpenRouter**. Connection tests use a four-second cooldown and pause scheduled NPC model calls while running. Free models remain subject to provider availability and OpenRouter's free-tier limits; paid models require credits. HTTPS access to `openrouter.ai` is required.
+The settings panel loads OpenRouter’s current model catalog, excludes the unpredictable `openrouter/free` router and non-text output models, and separates free from credit-priced choices. Search works against live model names and IDs. **Test selected model** verifies authentication and the structured character-response format used by this application.
 
-Live mode is **hybrid**, not a model call for every action. At most one character gets a model decision every eight real seconds, rotating across the crew. Routine actions continue through local rules between decisions and when a request fails. The server allows a maximum of 120 requests per hour per process, one concurrent request, and a 20-second provider timeout. It caps model output at 250 tokens. These are request limits, not a dollar-denominated spending cap.
+Free models can have strict provider rate limits. A successful connection test proves that the model and key worked for that request; it does not reserve later capacity. If direct chat reports HTTP 429, wait briefly or choose another model. The message remains in the NPC’s memory.
 
-The model receives the situation, a character's personality, goal, health, needs, inventory, current task status, nearby people, recent memories, recent per-character chat, and observer message. It chooses a validated action (`move`, `repair`, `eat`, `rest`, `talk`, `give`, or `punch`). World code owns navigation, inventory, repair, combat, and action execution. Model output is untrusted: unsupported actions and malformed responses are rejected. A request error is shown in settings and the world continues with local behavior. Pausing, resetting, importing, or intervening invalidates stale in-flight decisions.
+The app allows 120 model requests per hour per server process. Session keys remain browser-session only. Before exposing a funded endpoint publicly, add authentication and per-user budgets.
 
-This version uses structured world observations rather than visual perception. Speech output uses local browser text-to-speech; NPC hearing is still text input. It keeps bounded event memories rather than a vector database or unrestricted agent tools. It contains no multiplayer or external tool execution.
+## AI world creation
+
+The settings prompt can create a new bounded world through the selected model. The validated result contains:
+
+- title, premise, current situation, and objective
+- grass and sky colors
+- initial food and weather
+- 3–24 interactive objects with a supported type, name, position, color, scale, and interaction
+
+Creating a world replaces unsaved progress and pauses the new instance for review. After creation, every field and object remains editable in real time.
 
 ## Checks
 
 ```sh
-npm test              # simulation and API tests
-npm run build         # TypeScript validation and production bundle
-npm run test:browser  # desktop/mobile Playwright playtests and screenshots
+npm test
+npm run build
+npm run test:browser
 ```
 
-Browser tests use `/usr/bin/chromium` by default. Set `CHROMIUM_PATH` to another Chromium executable if needed. Screenshots go to ignored `artifacts/`.
+Browser screenshots are written to the ignored `artifacts/` directory.
 
 ## Code map
 
-- `src/engine.ts`: serializable simulation, movement routing, actions, observations, interventions, validated save loading.
-- `src/contracts.ts`: shared runtime schemas for observations, model decisions, and generated instance plans.
-- `src/World.tsx`: procedural 3D scene, character animation, camera controls, rendering fallback.
-- `src/App.tsx`: observer UI, simulation clock, save tools, live-decision scheduling.
-- `server/app.ts`: optional OpenRouter adapter for model discovery, connection testing, decisions and world planning, with validation, timeouts and request budgets; serves the production build.
-- `tests/`: simulation/API checks and browser playtests.
+- `src/engine.ts`: serializable open-ended simulation, individual memory, object interactions, movement, combat, interventions, and validated saves.
+- `src/contracts.ts`: schemas for worlds, objects, observations, decisions, chat replies, and generated instances.
+- `src/World.tsx`: procedural grass field, object geometry, people, speech bubbles, camera, and rendering fallback.
+- `src/App.tsx`: observer UI, direct AI chat, NPC editor, live world editor, save tools, and decision scheduling.
+- `server/app.ts`: OpenRouter catalog, connection test, direct chat, background decisions, and world generation.
+- `tests/`: engine, API, responsive UI, model chat, and browser playtests.
 
-Art and geometry are generated in code. Fonts are bundled locally. No external models or texture downloads are required. Work in the existing checkout; cloud tasks are already isolated, so no additional Git worktree is needed.
+All geometry and art are generated in code. Fonts are bundled locally. No external 3D assets or texture downloads are required.

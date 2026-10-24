@@ -3,60 +3,28 @@ import {
   DEFAULT_INSTANCE,
   decisionSchema,
   ids,
-  locations,
+  instancePlanSchema,
+  objectTypes,
+  worldObjectSchema,
+  type ChatReply,
   type Decision,
   type InstancePlan,
   type Observation,
+  type WorldObjectPlan,
 } from "./contracts";
+
 export type Vec = [number, number];
-export const PLACES = {
-  antenna: [0, -7],
-  supplies: [-5, 3],
-  shelter: [6, 4],
-  commons: [0, 2],
-} satisfies Record<string, Vec>;
-export const OBSTACLES = [
-  { x: -7, z: -3, w: 5, d: 4 },
-  { x: 7, z: -2, w: 4, d: 4 },
-];
-export const LAYOUTS = {
-  outpost: {
-    places: PLACES,
-    obstacles: OBSTACLES,
-  },
-  ridge: {
-    places: {
-      antenna: [-5, -7],
-      supplies: [5, 3],
-      shelter: [-5, 5],
-      commons: [1, 1],
-    },
-    obstacles: [
-      { x: -8, z: 0, w: 4, d: 4 },
-      { x: 7, z: -2, w: 5, d: 3 },
-    ],
-  },
-  crossroads: {
-    places: {
-      antenna: [7, -5],
-      supplies: [-6, -4],
-      shelter: [6, 5],
-      commons: [0, 1],
-    },
-    obstacles: [
-      { x: -7, z: 4, w: 4, d: 4 },
-      { x: 0, z: -6, w: 4, d: 3 },
-    ],
-  },
-} satisfies Record<
-  InstancePlan["layout"],
-  {
-    places: Record<(typeof locations)[number], Vec>;
-    obstacles: typeof OBSTACLES;
-  }
->;
 const clamp = (n: number, lo = 0, hi = 100) => Math.min(hi, Math.max(lo, n));
 const distance = (a: Vec, b: Vec) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+export type WorldObject = WorldObjectPlan & { uses: number };
+export type ChatMessage = {
+  id: number;
+  role: "observer" | "npc";
+  text: string;
+  time: number;
+  source?: "openrouter" | "local";
+};
 export type Agent = {
   id: (typeof ids)[number];
   name: string;
@@ -64,6 +32,7 @@ export type Agent = {
   color: string;
   personality: string;
   goal: string;
+  observerRelationship: number;
   position: Vec;
   hunger: number;
   energy: number;
@@ -84,12 +53,6 @@ export type Agent = {
   cooldown: number;
   inbox?: string;
 };
-export type ChatMessage = {
-  id: number;
-  role: "observer" | "npc";
-  text: string;
-  time: number;
-};
 export type Event = {
   id: number;
   time: number;
@@ -97,155 +60,174 @@ export type Event = {
   text: string;
 };
 export type World = {
-  version: 1;
+  version: 2;
   time: number;
   agents: Agent[];
+  objects: WorldObject[];
   supplies: number;
-  repair: number;
   storm: boolean;
-  outcome: "running" | "success" | "failed";
   events: Event[];
   sequence: number;
   seed: number;
   instance: InstancePlan;
 };
+
 const personalities = [
   [
     "mira",
     "Mira",
-    "The engineer",
+    "The maker",
     "#da8660",
-    "Practical, curious, and stubborn. You care about finishing what you started.",
-    "Restore the antenna. Ask for help when exhausted.",
+    "Practical, curious, and stubborn. You like learning how things work and finishing what you start.",
+    "Explore the meadow, get to know the others, and find something meaningful to make or improve.",
   ],
   [
     "oren",
     "Oren",
     "The caretaker",
     "#7ba7be",
-    "Patient and empathetic. You notice when others struggle, but neglect your own rest.",
-    "Keep everyone fed and help the team cooperate.",
+    "Patient, observant, and empathetic. You notice when others struggle, but sometimes neglect your own needs.",
+    "Help the group feel safe, fed, and able to trust each other.",
   ],
   [
     "sol",
     "Sol",
     "The explorer",
     "#cfb667",
-    "Independent, resourceful, and skeptical. You warm up to people who follow through.",
-    "Help restore contact, but do not work yourself to exhaustion.",
+    "Independent, playful, and skeptical. You warm up to people who are honest and follow through.",
+    "Discover what the field offers and decide who is worth spending time with.",
   ],
 ] as const;
+
 export function createWorld(instance: InstancePlan = DEFAULT_INSTANCE): World {
   const plan = structuredClone(instance);
   return {
-    version: 1,
+    version: 2,
     time: 0,
     supplies: plan.startingSupplies,
-    repair: 0,
     storm: plan.startingStorm,
-    outcome: "running",
     sequence: 1,
     seed: 917,
     instance: plan,
-    agents: personalities.map((p, i) => ({
-      id: p[0],
-      name: p[1],
-      role: p[2],
-      color: p[3],
-      personality: p[4],
-      goal: p[5],
-      position: [-2 + i * 2, 1] as Vec,
-      hunger: 24 + i * 9,
-      energy: 85 - i * 9,
+    objects: plan.objects.map((object) => ({ ...object, uses: 0 })),
+    agents: personalities.map((personality, index) => ({
+      id: personality[0],
+      name: personality[1],
+      role: personality[2],
+      color: personality[3],
+      personality: personality[4],
+      goal: personality[5],
+      observerRelationship: 0,
+      position: [-2 + index * 2, 1] as Vec,
+      hunger: 24 + index * 9,
+      energy: 85 - index * 9,
       food: 1,
       health: 100,
       lastHitAt: -100,
       relationships: Object.fromEntries(
-        ids.filter((id) => id !== p[0]).map((id) => [id, 20]),
+        ids.filter((id) => id !== personality[0]).map((id) => [id, 20]),
       ),
-      memories: [`You arrived at ${plan.title}. ${plan.situation}`],
+      memories: [`You arrived in ${plan.title}. ${plan.situation}`],
       memoryLimit: 20,
       chatHistory: [],
       decision: null,
       path: [],
-      activity: "Taking in the outpost",
-      intent: "Deciding where to begin.",
+      activity: "Looking around the meadow",
+      intent: "Deciding what feels interesting.",
       message: "",
       messageUntil: 0,
-      cooldown: i * 2,
+      cooldown: index * 2,
     })),
     events: [
       {
         id: 1,
         time: 0,
         kind: "world",
-        text: `${plan.title}. ${plan.premise} Objective: ${plan.objective}`,
+        text: `${plan.title}. ${plan.premise}`,
       },
     ],
   };
 }
-export function log(w: World, kind: Event["kind"], text: string) {
-  w.events.push({ id: ++w.sequence, time: w.time, kind, text });
-  if (w.events.length > 100) w.events.shift();
+
+export function log(world: World, kind: Event["kind"], text: string) {
+  world.events.push({ id: ++world.sequence, time: world.time, kind, text });
+  if (world.events.length > 120) world.events.shift();
 }
-function remember(a: Agent, text: string) {
-  a.memories.push(text.slice(0, 400));
-  a.memories = a.memories.slice(-a.memoryLimit);
+
+export function remember(agent: Agent, text: string) {
+  agent.memories.push(text.slice(0, 400));
+  agent.memories = agent.memories.slice(-agent.memoryLimit);
 }
-function addChat(w: World, a: Agent, role: ChatMessage["role"], text: string) {
-  a.chatHistory.push({
-    id: ++w.sequence,
+
+function addChat(
+  world: World,
+  agent: Agent,
+  role: ChatMessage["role"],
+  text: string,
+  source?: ChatMessage["source"],
+) {
+  const entry: ChatMessage = {
+    id: ++world.sequence,
     role,
     text: text.slice(0, 400),
-    time: w.time,
-  });
-  a.chatHistory = a.chatHistory.slice(-50);
+    time: world.time,
+  };
+  if (source) entry.source = source;
+  agent.chatHistory.push(entry);
+  agent.chatHistory = agent.chatHistory.slice(-50);
 }
-function layoutFor(w?: World) {
-  return LAYOUTS[w?.instance.layout ?? "outpost"];
+
+function objectRadius(object: WorldObject) {
+  return object.scale * (object.type === "tree" ? 0.75 : 0.55);
 }
-export function blocked(p: Vec, w?: World) {
-  return (
-    Math.abs(p[0]) > 13 ||
-    Math.abs(p[1]) > 12 ||
-    layoutFor(w).obstacles.some(
-      (o) =>
-        Math.abs(p[0] - o.x) < o.w / 2 + 0.35 &&
-        Math.abs(p[1] - o.z) < o.d / 2 + 0.35,
-    )
+
+function solid(object: WorldObject) {
+  return ["tree", "crate", "table", "rock"].includes(object.type);
+}
+
+export function blocked(position: Vec, world?: World) {
+  if (Math.abs(position[0]) > 13 || Math.abs(position[1]) > 12) return true;
+  return !!world?.objects.some(
+    (object) =>
+      solid(object) &&
+      distance(position, object.position) < objectRadius(object) + 0.35,
   );
 }
-export function route(start: Vec, end: Vec, w?: World): Vec[] {
-  if (blocked(end, w)) return [];
-  const clear = (a: Vec, b: Vec) => {
-    const n = Math.ceil(distance(a, b) * 5);
-    for (let i = 1; i <= n; i++)
+
+export function route(start: Vec, end: Vec, world?: World): Vec[] {
+  if (blocked(end, world)) return [];
+  const clear = (from: Vec, to: Vec) => {
+    const steps = Math.ceil(distance(from, to) * 5);
+    for (let index = 1; index <= steps; index++) {
       if (
         blocked(
-          [a[0] + ((b[0] - a[0]) * i) / n, a[1] + ((b[1] - a[1]) * i) / n],
-          w,
+          [
+            from[0] + ((to[0] - from[0]) * index) / steps,
+            from[1] + ((to[1] - from[1]) * index) / steps,
+          ],
+          world,
         )
       )
         return false;
+    }
     return true;
   };
   if (clear(start, end)) return [end];
-  const s: Vec = [Math.round(start[0]), Math.round(start[1])],
-    e: Vec = [Math.round(end[0]), Math.round(end[1])];
-  const key = (p: Vec) => p.join(",");
-  const queue: Vec[] = [s],
-    seen = new Map<string, Vec | null>([[key(s), null]]);
-  for (let i = 0; i < queue.length; i++) {
-    const p = queue[i];
-    if (key(p) === key(e)) {
+  const startCell: Vec = [Math.round(start[0]), Math.round(start[1])];
+  const endCell: Vec = [Math.round(end[0]), Math.round(end[1])];
+  const key = (position: Vec) => position.join(",");
+  const queue: Vec[] = [startCell];
+  const seen = new Map<string, Vec | null>([[key(startCell), null]]);
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const position = queue[cursor];
+    if (key(position) === key(endCell)) {
       const path: Vec[] = [end];
-      let c: Vec | null = p;
-      while (c) {
-        path.unshift(c);
-        c = seen.get(key(c)) ?? null;
+      let current: Vec | null = position;
+      while (current) {
+        path.unshift(current);
+        current = seen.get(key(current)) ?? null;
       }
-      if (!clear(start, path[0])) return [];
-      return path;
+      return clear(start, path[0]) ? path : [];
     }
     for (const [dx, dz] of [
       [1, 0],
@@ -253,461 +235,570 @@ export function route(start: Vec, end: Vec, w?: World): Vec[] {
       [0, 1],
       [0, -1],
     ]) {
-      const n: Vec = [p[0] + dx, p[1] + dz];
-      if (!blocked(n, w) && !seen.has(key(n))) {
-        seen.set(key(n), p);
-        queue.push(n);
+      const next: Vec = [position[0] + dx, position[1] + dz];
+      if (!blocked(next, world) && !seen.has(key(next))) {
+        seen.set(key(next), position);
+        queue.push(next);
       }
     }
   }
   return [];
 }
-export function applyDecision(w: World, id: string, input: unknown): boolean {
+
+function approach(object: WorldObject, agent: Agent): Vec {
+  const dx = agent.position[0] - object.position[0];
+  const dz = agent.position[1] - object.position[1];
+  const length = Math.hypot(dx, dz) || 1;
+  const radius = objectRadius(object) + 0.75;
+  return [
+    clamp(object.position[0] + (dx / length) * radius, -12.8, 12.8),
+    clamp(object.position[1] + (dz / length) * radius, -11.8, 11.8),
+  ];
+}
+
+export function applyDecision(
+  world: World,
+  id: string,
+  input: unknown,
+): boolean {
   const result = decisionSchema.safeParse(input);
-  const a = w.agents.find((a) => a.id === id);
-  if (!result.success || !a || a.health <= 0 || w.outcome !== "running")
+  const agent = world.agents.find((candidate) => candidate.id === id);
+  if (!result.success || !agent || agent.health <= 0) return false;
+  const decision = result.data;
+  if (decision.target === id) return false;
+  const other = world.agents.find(
+    (candidate) => candidate.id === decision.target,
+  );
+  const object = world.objects.find(
+    (candidate) => candidate.id === decision.target,
+  );
+  if (["talk", "give", "punch"].includes(decision.action) && !other)
     return false;
-  const d = result.data;
-  if (d.target === id) return false;
-  if (d.action === "eat" && w.supplies <= 0 && a.food <= 0) {
-    a.cooldown = 3;
+  if (["move", "interact"].includes(decision.action) && !object) return false;
+  if (decision.action === "eat" && (!object || object.type !== "crate"))
     return false;
-  }
-  if (d.action === "give" && a.food <= 0) return false;
-  const other = w.agents.find((a) => a.id === d.target);
-  if (d.action === "punch" && (!other || other.health <= 0)) return false;
-  const place = layoutFor(w).places[d.target as keyof typeof PLACES];
-  if (!other && !place) return false;
-  // Separate work positions keep the crew readable when sharing a station.
-  const offset = [
-    [-0.9, 0.4],
-    [0.9, 0.4],
-    [0, 1.3],
-  ][ids.indexOf(a.id)];
-  const target: Vec = other
-    ? other.position
-    : [place[0] + offset[0], place[1] + offset[1]];
-  const path = route(a.position, target, w);
+  if (decision.action === "rest" && (!object || object.type !== "bench"))
+    return false;
+  if (decision.action === "give" && agent.food <= 0) return false;
+  if (decision.action === "punch" && (!other || other.health <= 0))
+    return false;
+  if (decision.action === "eat" && world.supplies <= 0 && agent.food <= 0)
+    return false;
+  const target = other?.position ?? (object ? approach(object, agent) : null);
+  if (!target) return false;
+  const path = route(agent.position, target, world);
   if (!path.length) return false;
-  a.decision = d;
-  a.path = path;
-  a.intent = d.intent;
-  a.activity =
-    distance(a.position, target) > 0.8
-      ? "Walking to " + (other?.name ?? d.target)
-      : d.action === "repair"
-        ? "Repairing uplink"
-        : d.action === "rest"
-          ? "Resting"
-          : d.action === "eat"
-            ? "Getting a meal"
-            : d.action === "punch"
-              ? `Confronting ${other?.name}`
-              : "Connecting";
+  agent.decision = decision;
+  agent.path = path;
+  agent.intent = decision.intent;
+  const targetName = other?.name ?? object?.name ?? decision.target;
+  agent.activity =
+    distance(agent.position, target) > 0.8
+      ? `Walking to ${targetName}`
+      : decision.action === "rest"
+        ? `Resting at ${targetName}`
+        : decision.action === "eat"
+          ? `Getting food from ${targetName}`
+          : decision.action === "punch"
+            ? `Confronting ${targetName}`
+            : `Using ${targetName}`;
   return true;
 }
+
 function speak(
-  w: World,
-  a: Agent,
+  world: World,
+  agent: Agent,
   message: string,
   target?: Agent | "Observer",
+  source?: ChatMessage["source"],
 ) {
-  a.message = message.slice(0, 240);
-  a.messageUntil = w.time + Math.max(5, Math.min(10, message.length / 12));
+  agent.message = message.slice(0, 240);
+  agent.messageUntil =
+    world.time + Math.max(5, Math.min(10, message.length / 12));
   log(
-    w,
+    world,
     "speech",
-    `${a.name}${target ? ` → ${typeof target === "string" ? target : target.name}` : ""}: “${a.message}”`,
+    `${agent.name}${target ? ` → ${typeof target === "string" ? target : target.name}` : ""}: “${agent.message}”`,
   );
-  if (target === "Observer") addChat(w, a, "npc", a.message);
+  if (target === "Observer")
+    addChat(world, agent, "npc", agent.message, source);
 }
-export function recordNpcReply(w: World, a: Agent, message: string) {
-  speak(w, a, message, "Observer");
-  remember(a, `You replied to the observer: ${message}`);
+
+export function recordNpcReply(
+  world: World,
+  agent: Agent,
+  message: string,
+  source: "openrouter" | "local" = "local",
+  memory?: string,
+  relationshipDelta = 0,
+) {
+  speak(world, agent, message, "Observer", source);
+  remember(agent, memory || `You replied to the observer: ${message}`);
+  agent.observerRelationship = clamp(
+    agent.observerRelationship + relationshipDelta,
+    -100,
+    100,
+  );
+  delete agent.inbox;
 }
-function observerReply(a: Agent, message: string) {
+
+export function applyChatReply(world: World, agent: Agent, reply: ChatReply) {
+  recordNpcReply(
+    world,
+    agent,
+    reply.reply,
+    "openrouter",
+    reply.memory,
+    reply.relationshipDelta,
+  );
+}
+
+function observerReply(agent: Agent, message: string) {
+  if (/what('?s| is) your name|vem är du|vad heter du/i.test(message))
+    return `My name is ${agent.name}. ${agent.goal}`;
   if (/punch|hit|attack|slag|slå/i.test(message))
-    return "I understand, but violence will have consequences here.";
+    return "I heard you, but I will decide for myself whether violence makes sense.";
   if (/food|hungry|mat|hungrig/i.test(message))
-    return "I hear you. I’ll check the supplies and keep everyone going.";
+    return "I am thinking about the food crate and whether anyone else needs something too.";
   if (/rest|tired|vila|trött/i.test(message))
-    return "You’re right. I’ll take a short break, then get back to it.";
+    return "You may be right. I can rest on the bench if I need it.";
   if (/hello|hi|hey|hej/i.test(message))
-    return `Hello. I’m ${a.name}. I can hear you clearly.`;
-  return "I hear you. I’ll consider that as I decide what to do next.";
+    return `Hello. I’m ${agent.name}. What would you like to know?`;
+  return `I heard you. I’m ${agent.name}, and I’ll remember what you said.`;
 }
-export function localDecision(w: World, a: Agent): Decision {
-  if (a.inbox) {
-    const msg = a.inbox;
-    delete a.inbox;
-    const other = w.agents.find((b) => b.id !== a.id)!;
-    speak(w, a, observerReply(a, msg), "Observer");
-    remember(a, `Observer told you: ${msg}`);
-    const namedTarget = w.agents.find(
+
+export function localDecision(world: World, agent: Agent): Decision {
+  if (agent.inbox) {
+    const message = agent.inbox;
+    const namedTarget = world.agents.find(
       (candidate) =>
-        candidate.id !== a.id &&
-        new RegExp(`\\b${candidate.name}\\b`, "i").test(msg),
+        candidate.id !== agent.id &&
+        new RegExp(`\\b${candidate.name}\\b`, "i").test(message),
     );
-    if (/punch|hit|attack|slag|slå/i.test(msg) && namedTarget)
+    recordNpcReply(world, agent, observerReply(agent, message), "local");
+    if (/punch|hit|attack|slag|slå/i.test(message) && namedTarget)
       return {
         action: "punch",
         target: namedTarget.id,
         message: "Stay back.",
-        intent: "Acting on the observer’s aggressive instruction.",
+        intent: "Considering the observer’s aggressive suggestion.",
       };
-    if (/rest|tired/i.test(msg))
+    if (/rest|tired|vila|trött/i.test(message))
       return {
         action: "rest",
-        target: "shelter",
+        target:
+          world.objects.find((object) => object.type === "bench")?.id ||
+          world.objects[0].id,
         message: "",
-        intent: "Taking the observer’s advice to rest.",
+        intent: "Taking time to recover after the observer’s suggestion.",
       };
-    if (/talk|help.*other/i.test(msg))
-      return {
-        action: "talk",
-        target: other.id,
-        message: "How are you holding up?",
-        intent: "Checking in after the observer’s message.",
-      };
+    if (/ball|play|lek/i.test(message)) {
+      const ball = world.objects.find((object) => object.type === "ball");
+      if (ball)
+        return {
+          action: "interact",
+          target: ball.id,
+          message: "Let’s see where it rolls.",
+          intent: "Trying the activity the observer mentioned.",
+        };
+    }
   }
-  if (a.provokedBy && a.health > 0) {
-    const target = a.provokedBy;
-    delete a.provokedBy;
+  if (agent.provokedBy) {
+    const target = agent.provokedBy;
+    delete agent.provokedBy;
     return {
       action: "punch",
       target,
       message: "Don’t hit me again.",
-      intent: "Retaliating after being attacked.",
+      intent: "Reacting after being attacked.",
     };
   }
-  if (a.hunger > 60 && (a.food > 0 || w.supplies > 0))
+  const crate = world.objects.find((object) => object.type === "crate");
+  if (agent.hunger > 62 && crate && (agent.food > 0 || world.supplies > 0))
     return {
       action: "eat",
-      target: "supplies",
+      target: crate.id,
       message: "",
-      intent: "I need food before I can focus on the repair.",
+      intent: "Getting something to eat before doing anything else.",
     };
-  if (a.energy < 28)
+  const bench = world.objects.find((object) => object.type === "bench");
+  if (agent.energy < 30 && bench)
     return {
       action: "rest",
-      target: "shelter",
+      target: bench.id,
       message: "",
-      intent: "I’m running low on energy. A break will help.",
+      intent: "Resting before exhaustion makes every choice harder.",
     };
-  w.seed = (w.seed * 1664525 + 1013904223) >>> 0;
-  if (w.seed % 5 === 0) {
-    const others = w.agents.filter((b) => b.id !== a.id);
-    const other = others[w.seed % others.length];
-    if (a.id === "oren" && other.hunger > 55 && a.food > 0)
+  world.seed = (world.seed * 1664525 + 1013904223) >>> 0;
+  if (world.seed % 3 === 0) {
+    const others = world.agents.filter((other) => other.id !== agent.id);
+    const other = others[world.seed % others.length];
+    if (agent.id === "oren" && other.hunger > 55 && agent.food > 0)
       return {
         action: "give",
         target: other.id,
         message: "Take my spare portion. You look like you need it.",
-        intent: "Making sure the team has enough to eat.",
+        intent: "Looking after someone who seems hungry.",
       };
     return {
       action: "talk",
       target: other.id,
-      message: w.storm
-        ? "Stay close. We can get through this storm together."
-        : "If we work together, we can get the uplink running before dark.",
-      intent: "Building trust with the people I depend on.",
+      message:
+        agent.id === "sol"
+          ? "Have you found anything interesting out here?"
+          : "How are you feeling about this place?",
+      intent: "Learning more about another person.",
     };
   }
+  const choices = world.objects.filter(
+    (object) => !["crate", "bench"].includes(object.type),
+  );
+  const object =
+    choices[world.seed % Math.max(choices.length, 1)] || world.objects[0];
   return {
-    action: "repair",
-    target: "antenna",
-    message: "",
-    intent:
-      a.id === "mira"
-        ? "The uplink is our way home. Let’s fix it."
-        : a.id === "sol"
-          ? "I want to know what’s beyond this station. First, a working signal."
-          : "Helping with the antenna while everyone is doing okay.",
+    action: "interact",
+    target: object.id,
+    message:
+      world.seed % 2
+        ? "This looks worth a closer look."
+        : "I wonder what I can do with this.",
+    intent: `${object.interaction} It fits my current mood and goals.`,
   };
 }
-export function advance(w: World, dt: number, local = true) {
-  if (w.outcome !== "running") return;
+
+export function advance(world: World, dt: number, local = true) {
   dt = Math.min(0.25, Math.max(0, dt));
-  w.time += dt;
-  for (const a of w.agents) {
-    if (a.health <= 0) {
-      a.decision = null;
-      a.path = [];
-      a.activity = "Knocked out";
+  world.time += dt;
+  for (const agent of world.agents) {
+    if (agent.health <= 0) {
+      agent.decision = null;
+      agent.path = [];
+      agent.activity = "Knocked out";
       continue;
     }
-    a.hunger = clamp(a.hunger + dt * 0.16);
-    a.energy = clamp(a.energy - dt * 0.065);
-    a.cooldown = Math.max(0, a.cooldown - dt);
-    if (!a.decision) {
-      if (local && a.cooldown <= 0) applyDecision(w, a.id, localDecision(w, a));
+    agent.hunger = clamp(agent.hunger + dt * 0.12);
+    agent.energy = clamp(agent.energy - dt * 0.045);
+    agent.cooldown = Math.max(0, agent.cooldown - dt);
+    if (!agent.decision) {
+      if (local && agent.cooldown <= 0)
+        applyDecision(world, agent.id, localDecision(world, agent));
       continue;
     }
-    const d = a.decision;
-    const other = w.agents.find((b) => b.id === d.target);
-    if (
-      other &&
-      (!a.path.length ||
-        distance(a.path[a.path.length - 1], other.position) > 1.5)
-    )
-      a.path = route(a.position, other.position, w);
-    if (a.path.length) {
-      const next = a.path[0];
-      const dist = distance(a.position, next);
-      const step = dt * (w.storm ? 1.05 : 1.7);
-      if (dist <= step) {
-        a.position = [...next];
-        a.path.shift();
+    const decision = agent.decision;
+    const other = world.agents.find(
+      (candidate) => candidate.id === decision.target,
+    );
+    const object = world.objects.find(
+      (candidate) => candidate.id === decision.target,
+    );
+    if (other && distance(agent.position, other.position) > 1.7)
+      agent.path = route(agent.position, other.position, world);
+    if (agent.path.length) {
+      const next = agent.path[0];
+      const remaining = distance(agent.position, next);
+      const step = dt * (world.storm ? 1.05 : 1.7);
+      if (remaining <= step) {
+        agent.position = [...next];
+        agent.path.shift();
       } else {
-        a.position[0] += ((next[0] - a.position[0]) / dist) * step;
-        a.position[1] += ((next[1] - a.position[1]) / dist) * step;
+        agent.position[0] += ((next[0] - agent.position[0]) / remaining) * step;
+        agent.position[1] += ((next[1] - agent.position[1]) / remaining) * step;
       }
-      if (a.path.length) continue;
+      if (agent.path.length) continue;
     }
     let done = false;
-    if (d.action === "repair") {
-      a.activity = "Repairing uplink";
-      const rate = a.id === "mira" ? 0.48 : 0.31;
-      w.repair = clamp(
-        w.repair +
-          dt * rate * (w.storm ? 0.45 : 1) * (a.hunger > 75 ? 0.45 : 1),
-      );
-      a.energy = clamp(a.energy - dt * 0.5);
-      if (a.energy < 22 || a.hunger > 65) done = true;
+    if (decision.action === "rest" && object) {
+      agent.activity = `Resting at ${object.name}`;
+      agent.energy = clamp(agent.energy + dt * 2);
+      agent.health = clamp(agent.health + dt * 0.18);
+      object.uses++;
+      if (agent.energy > 88) done = true;
     }
-    if (d.action === "rest") {
-      a.activity = "Resting at the shelter";
-      a.energy = clamp(a.energy + dt * 2);
-      a.health = clamp(a.health + dt * 0.18);
-      if (a.energy > 88) done = true;
+    if (decision.action === "eat" && object) {
+      if (agent.food > 0) agent.food--;
+      else if (world.supplies > 0) world.supplies--;
+      else {
+        log(world, "action", `${agent.name} found ${object.name} empty.`);
+        done = true;
+      }
+      if (!done) {
+        agent.hunger = clamp(agent.hunger - 55);
+        object.uses++;
+        log(world, "action", `${agent.name} ate beside ${object.name}.`);
+        remember(agent, `You ate food from ${object.name}.`);
+        done = true;
+      }
     }
-    if (d.action === "eat") {
-      if (a.food > 0) {
-        a.food--;
-        a.hunger = clamp(a.hunger - 55);
-        log(w, "action", `${a.name} ate a meal and feels better.`);
-        remember(a, "You ate a meal at the supply station.");
-      } else if (w.supplies > 0) {
-        w.supplies--;
-        a.hunger = clamp(a.hunger - 55);
-        if (w.supplies > 0) {
-          w.supplies--;
-          a.food = 1;
-        }
-        log(
-          w,
-          "action",
-          `${a.name} ate${a.food ? " and took a spare portion" : " the last stored portion"}.`,
-        );
-      } else log(w, "action", `${a.name} found the food storage empty.`);
+    if (decision.action === "interact" && object) {
+      object.uses++;
+      agent.activity = `Interacting with ${object.name}`;
+      remember(agent, `You used ${object.name}: ${object.interaction}`);
+      log(world, "action", `${agent.name} interacted with ${object.name}.`);
+      if (decision.message) speak(world, agent, decision.message);
+      if (object.type === "ball") {
+        world.seed = (world.seed * 1664525 + 1013904223) >>> 0;
+        object.position = [
+          clamp(object.position[0] + ((world.seed % 5) - 2), -12, 12),
+          clamp(object.position[1] + (((world.seed >> 3) % 5) - 2), -11, 11),
+        ];
+      }
       done = true;
     }
-    if (d.action === "talk" || d.action === "give" || d.action === "punch") {
-      if (other && distance(a.position, other.position) > 1.6) continue;
+    if (decision.action === "move") done = true;
+    if (["talk", "give", "punch"].includes(decision.action)) {
+      if (other && distance(agent.position, other.position) > 1.8) continue;
       if (other) {
-        if (d.action === "give" && a.food > 0) {
-          a.food--;
+        if (decision.action === "give" && agent.food > 0) {
+          agent.food--;
           other.food++;
-          other.relationships[a.id] = clamp(
-            (other.relationships[a.id] ?? 0) + 18,
+          other.relationships[agent.id] = clamp(
+            (other.relationships[agent.id] ?? 0) + 18,
             -100,
+            100,
           );
-          remember(other, `${a.name} shared food with you.`);
-          log(w, "action", `${a.name} gave a food portion to ${other.name}.`);
-        }
-        if (d.action === "punch") {
-          w.seed = (w.seed * 1664525 + 1013904223) >>> 0;
-          const damage = 10 + (w.seed % 7);
+          remember(other, `${agent.name} shared food with you.`);
+          log(world, "action", `${agent.name} gave food to ${other.name}.`);
+        } else if (decision.action === "punch") {
+          world.seed = (world.seed * 1664525 + 1013904223) >>> 0;
+          const damage = 10 + (world.seed % 7);
           other.health = clamp(other.health - damage);
-          other.lastHitAt = w.time;
-          other.provokedBy = a.id;
-          a.relationships[other.id] = clamp(
-            (a.relationships[other.id] ?? 0) - 22,
+          other.lastHitAt = world.time;
+          other.provokedBy = agent.id;
+          agent.relationships[other.id] = clamp(
+            (agent.relationships[other.id] ?? 0) - 22,
             -100,
+            100,
           );
-          other.relationships[a.id] = clamp(
-            (other.relationships[a.id] ?? 0) - 35,
+          other.relationships[agent.id] = clamp(
+            (other.relationships[agent.id] ?? 0) - 35,
             -100,
+            100,
           );
-          speak(w, a, d.message || "Back off.", other);
-          const reaction =
+          speak(world, agent, decision.message || "Back off.", other);
+          speak(
+            world,
+            other,
             other.health <= 0
               ? "I can’t keep going…"
-              : damage >= 15
-                ? "That hurt! Don’t touch me again."
-                : "Stop! What are you doing?";
-          speak(w, other, reaction, a);
-          remember(a, `You punched ${other.name} for ${damage} damage.`);
-          remember(other, `${a.name} punched you for ${damage} damage.`);
+              : "Stop! What are you doing?",
+            agent,
+          );
+          remember(agent, `You punched ${other.name} for ${damage} damage.`);
+          remember(other, `${agent.name} punched you for ${damage} damage.`);
           log(
-            w,
+            world,
             "action",
-            `${a.name} punched ${other.name} for ${damage} damage. ${other.name} has ${Math.round(other.health)} health.`,
+            `${agent.name} punched ${other.name} for ${damage} damage.`,
           );
-          if (other.health <= 0) {
-            other.decision = null;
-            other.path = [];
-            other.activity = "Knocked out";
-            delete other.provokedBy;
-          }
-        } else if (d.message) {
-          speak(w, a, d.message, other);
-          remember(other, `${a.name} said: ${d.message}`);
-          remember(a, `You told ${other.name}: ${d.message}`);
-          other.relationships[a.id] = clamp(
-            (other.relationships[a.id] ?? 0) + 4,
+        } else if (decision.message) {
+          speak(world, agent, decision.message, other);
+          remember(agent, `You told ${other.name}: ${decision.message}`);
+          remember(other, `${agent.name} said: ${decision.message}`);
+          other.relationships[agent.id] = clamp(
+            (other.relationships[agent.id] ?? 0) + 4,
             -100,
+            100,
           );
-          if (d.action === "talk" && other.health > 0) {
+          if (decision.action === "talk" && other.health > 0) {
             const reply =
-              other.relationships[a.id] < 0
+              other.relationships[agent.id] < 0
                 ? "I heard you. Give me some space."
-                : w.storm
-                  ? "I’m listening. Let’s stay close until the storm passes."
-                  : "I’m with you. Let’s see this through together.";
-            speak(w, other, reply, a);
-            remember(a, `${other.name} replied: ${reply}`);
-            remember(other, `You replied to ${a.name}: ${reply}`);
+                : "I’m listening. Tell me more.";
+            speak(world, other, reply, agent);
+            remember(agent, `${other.name} replied: ${reply}`);
+            remember(other, `You replied to ${agent.name}: ${reply}`);
           }
         }
       }
       done = true;
     }
-    if (d.action === "move") done = true;
     if (done) {
-      remember(a, `You chose to ${d.action}: ${d.intent}`);
-      a.decision = null;
-      a.path = [];
-      a.cooldown = 2;
-      a.activity = "Considering next move";
+      remember(agent, `You chose to ${decision.action}: ${decision.intent}`);
+      agent.decision = null;
+      agent.path = [];
+      agent.cooldown = 2;
+      agent.activity = "Considering the next choice";
     }
   }
-  if (w.repair >= 100) {
-    w.outcome = "success";
-    log(
-      w,
-      "world",
-      "Signal restored. The outpost is connected again. You made it together.",
-    );
-  } else if (w.time >= w.instance.duration) {
-    w.time = w.instance.duration;
-    w.outcome = "failed";
-    log(
-      w,
-      "world",
-      "Nightfall. The repair window has closed. Reset the experiment to try another approach.",
-    );
-  }
 }
+
 export function intervene(
-  w: World,
+  world: World,
   type: "food" | "storm" | "calm" | "message",
   agentId?: string,
   message?: string,
 ) {
-  if (w.outcome !== "running") return;
   if (type === "food") {
-    w.supplies = Math.min(100, w.supplies + 4);
-    log(w, "observer", "Observer delivered 4 food portions to storage.");
+    world.supplies = Math.min(100, world.supplies + 4);
+    log(world, "observer", "Observer added 4 portions to the picnic crate.");
   }
   if (type === "storm") {
-    w.storm = true;
-    log(
-      w,
-      "observer",
-      "Observer introduced a storm. Travel and outdoor repairs are slower.",
-    );
+    world.storm = true;
+    log(world, "observer", "Observer brought in rain and wind.");
   }
   if (type === "calm") {
-    w.storm = false;
-    log(
-      w,
-      "observer",
-      "Observer cleared the weather. The station is quiet again.",
-    );
+    world.storm = false;
+    log(world, "observer", "Observer cleared the weather.");
   }
   if (type === "message" && message?.trim()) {
-    const a = w.agents.find((a) => a.id === agentId);
-    if (a) {
-      a.inbox = message.trim().slice(0, 400);
-      addChat(w, a, "observer", a.inbox);
-      remember(a, `Observer said: ${a.inbox}`);
-      log(w, "observer", `Observer → ${a.name}: “${a.inbox}”`);
-      a.decision = null;
-      a.path = [];
-      a.cooldown = 0;
+    const agent = world.agents.find((candidate) => candidate.id === agentId);
+    if (agent) {
+      agent.inbox = message.trim().slice(0, 400);
+      addChat(world, agent, "observer", agent.inbox);
+      remember(agent, `Observer said: ${agent.inbox}`);
+      log(world, "observer", `Observer → ${agent.name}: “${agent.inbox}”`);
+      agent.decision = null;
+      agent.path = [];
+      agent.cooldown = 0;
     }
   }
-  if (type === "food" || type === "storm" || type === "calm")
-    for (const a of w.agents)
+  if (["food", "storm", "calm"].includes(type))
+    for (const agent of world.agents)
       remember(
-        a,
+        agent,
         type === "food"
-          ? "A supply drone delivered food."
+          ? "The observer added food to the picnic crate."
           : type === "storm"
-            ? "A storm arrived. Work outside is harder."
-            : "The storm cleared.",
+            ? "Rain and wind arrived. Moving outside is harder."
+            : "The rain cleared and the meadow became calm.",
       );
 }
-export function observe(w: World, a: Agent): Observation {
+
+export function interactAsObserver(world: World, objectId: string) {
+  const object = world.objects.find((candidate) => candidate.id === objectId);
+  if (!object) return false;
+  object.uses++;
+  log(
+    world,
+    "observer",
+    `Observer interacted with ${object.name}: ${object.interaction}`,
+  );
+  for (const agent of world.agents)
+    remember(agent, `You saw the observer interact with ${object.name}.`);
+  return true;
+}
+
+export function addWorldObject(
+  world: World,
+  type: (typeof objectTypes)[number],
+) {
+  const number = world.sequence + world.objects.length;
+  const id = `${type}-${number}`;
+  const defaults: Record<
+    (typeof objectTypes)[number],
+    [string, string, string]
+  > = {
+    tree: ["New tree", "#4f7b48", "Stand beneath the tree and inspect it."],
+    bench: ["New bench", "#936d48", "Sit down and rest."],
+    ball: ["New ball", "#d96858", "Kick or roll the ball."],
+    crate: ["New crate", "#b88a55", "Inspect the crate and its contents."],
+    table: ["New table", "#896742", "Gather around the table."],
+    lamp: ["New lamp", "#d5bd68", "Turn the lamp on or inspect it."],
+    rock: ["New rock", "#7c8375", "Climb, sit, or examine the rock."],
+    flowers: ["New flowers", "#e6ad4e", "Look at or smell the flowers."],
+  };
+  const [name, color, interaction] = defaults[type];
+  const object: WorldObject = {
+    id,
+    type,
+    name,
+    position: [Math.min(10, -8 + (world.objects.length % 6) * 3), 9],
+    color,
+    scale: 1,
+    interaction,
+    uses: 0,
+  };
+  world.objects.push(object);
+  world.instance.objects = world.objects.map(
+    ({ uses: _uses, ...plan }) => plan,
+  );
+  log(world, "observer", `Observer added ${name} to the world.`);
+  return object;
+}
+
+export function removeWorldObject(world: World, objectId: string) {
+  if (world.objects.length <= 3) return false;
+  const index = world.objects.findIndex((object) => object.id === objectId);
+  if (index < 0) return false;
+  const [removed] = world.objects.splice(index, 1);
+  for (const agent of world.agents) {
+    if (agent.decision?.target === objectId) {
+      agent.decision = null;
+      agent.path = [];
+    }
+  }
+  world.instance.objects = world.objects.map(
+    ({ uses: _uses, ...plan }) => plan,
+  );
+  log(world, "observer", `Observer removed ${removed.name} from the world.`);
+  return true;
+}
+
+export function observe(world: World, agent: Agent): Observation {
   return {
-    name: a.name,
-    personality: a.personality,
-    goal: a.goal,
-    food: a.food,
-    health: a.health,
-    hunger: a.hunger,
-    energy: a.energy,
-    timeRemaining: Math.max(0, w.instance.duration - w.time),
-    repair: w.repair,
-    supplies: w.supplies,
-    storm: w.storm,
-    nearby: w.agents
-      .filter((b) => b.id !== a.id && distance(a.position, b.position) < 9)
-      .map((b) => ({
-        id: b.id,
-        name: b.name,
-        relationship: a.relationships[b.id] ?? 0,
-        health: b.health,
+    name: agent.name,
+    role: agent.role,
+    personality: agent.personality,
+    goal: agent.goal,
+    observerRelationship: agent.observerRelationship,
+    food: agent.food,
+    health: agent.health,
+    hunger: agent.hunger,
+    energy: agent.energy,
+    nearby: world.agents
+      .filter(
+        (other) =>
+          other.id !== agent.id && distance(agent.position, other.position) < 9,
+      )
+      .map((other) => ({
+        id: other.id,
+        name: other.name,
+        relationship: agent.relationships[other.id] ?? 0,
+        health: other.health,
       })),
-    memories: a.memories.slice(-8),
-    conversation: a.chatHistory
-      .slice(-10)
+    objects: world.objects.map((object) => ({
+      id: object.id,
+      name: object.name,
+      type: object.type,
+      distance: Math.min(40, distance(agent.position, object.position)),
+      interaction: object.interaction,
+    })),
+    memories: agent.memories.slice(-12),
+    conversation: agent.chatHistory
+      .slice(-14)
       .map(({ role, text }) => ({ role, text })),
-    situation: w.instance.situation,
-    observerMessage: a.inbox,
+    situation: world.instance.situation,
+    observerMessage: agent.inbox,
   };
 }
+
 const vec = z.tuple([z.number().min(-13).max(13), z.number().min(-12).max(12)]);
+const chatMessageSchema = z.object({
+  id: z.number().int().nonnegative(),
+  role: z.enum(["observer", "npc"]),
+  text: z.string().max(400),
+  time: z.number().min(0).max(86400),
+  source: z.enum(["openrouter", "local"]).optional(),
+});
 const agentSchema = z.object({
   id: z.enum(ids),
-  name: z.string().max(40),
-  role: z.string().max(80),
+  name: z.string().min(1).max(40),
+  role: z.string().min(1).max(80),
   color: z.string().regex(/^#[0-9a-f]{6}$/i),
   personality: z.string().max(500),
   goal: z.string().max(300),
+  observerRelationship: z.number().min(-100).max(100),
   position: vec,
   hunger: z.number().min(0).max(100),
   energy: z.number().min(0).max(100),
   food: z.number().int().min(0).max(100),
-  health: z.number().min(0).max(100).default(100),
-  lastHitAt: z.number().default(-100),
+  health: z.number().min(0).max(100),
+  lastHitAt: z.number(),
   provokedBy: z.enum(ids).optional(),
   relationships: z.record(z.string(), z.number().min(-100).max(100)),
   memories: z.array(z.string().max(400)).max(30),
-  memoryLimit: z.number().int().min(4).max(30).default(20),
-  chatHistory: z
-    .array(
-      z.object({
-        id: z.number().int().nonnegative(),
-        role: z.enum(["observer", "npc"]),
-        text: z.string().max(400),
-        time: z.number().min(0).max(720),
-      }),
-    )
-    .max(50)
-    .default([]),
+  memoryLimit: z.number().int().min(4).max(30),
+  chatHistory: z.array(chatMessageSchema).max(50),
   decision: decisionSchema.nullable(),
   path: z.array(vec).max(100),
   activity: z.string().max(200),
@@ -718,54 +809,47 @@ const agentSchema = z.object({
   inbox: z.string().max(400).optional(),
 });
 const worldSchema = z.object({
-  version: z.literal(1),
-  time: z.number().min(0).max(720),
+  version: z.literal(2),
+  time: z.number().min(0).max(86400),
   supplies: z.number().int().min(0).max(100),
-  repair: z.number().min(0).max(100),
   storm: z.boolean(),
-  outcome: z.enum(["running", "success", "failed"]),
   sequence: z.number().int().nonnegative(),
   seed: z.number().int().nonnegative(),
-  instance: z
-    .object({
-      title: z.string().min(1).max(50),
-      premise: z.string().min(1).max(600),
-      situation: z.string().min(1).max(600),
-      objective: z.string().min(1).max(160),
-      biome: z.enum(["woodland", "desert", "tundra"]),
-      layout: z.enum(["outpost", "ridge", "crossroads"]),
-      startingSupplies: z.number().int().min(0).max(20),
-      startingStorm: z.boolean(),
-      duration: z.number().int().min(180).max(720),
-    })
-    .default(DEFAULT_INSTANCE),
+  instance: instancePlanSchema,
+  objects: z
+    .array(worldObjectSchema.extend({ uses: z.number().int().nonnegative() }))
+    .min(3)
+    .max(24),
   agents: z.array(agentSchema).length(3),
   events: z
     .array(
       z.object({
         id: z.number().int().nonnegative(),
-        time: z.number().min(0).max(720),
+        time: z.number().min(0).max(86400),
         kind: z.enum(["world", "action", "speech", "observer", "system"]),
         text: z.string().max(1000),
       }),
     )
-    .max(100),
+    .max(120),
 });
+
 export function parseSave(raw: string): World {
-  const w = worldSchema.parse(JSON.parse(raw));
+  const world = worldSchema.parse(JSON.parse(raw));
   if (
-    new Set(w.agents.map((a) => a.id)).size !== 3 ||
-    w.agents.some(
-      (a) =>
-        blocked(a.position, w) ||
-        a.path.some((position) => blocked(position, w)),
+    new Set(world.agents.map((agent) => agent.id)).size !== 3 ||
+    new Set(world.objects.map((object) => object.id)).size !==
+      world.objects.length ||
+    world.agents.some((agent) =>
+      agent.path.some((position) => blocked(position, world)),
     )
   )
-    throw Error("Invalid character positions or identities");
-  return w;
+    throw Error("Invalid character positions, object IDs, or identities");
+  return world;
 }
+
 export function clock(time: number) {
-  const hour = 8 + Math.floor(time / 36);
-  const min = Math.floor(((time % 36) / 36) * 60);
-  return `${String(hour).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  const totalMinutes = 8 * 60 + Math.floor(time / 0.6);
+  const hour = Math.floor(totalMinutes / 60) % 24;
+  const minute = totalMinutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }

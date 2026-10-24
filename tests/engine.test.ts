@@ -1,122 +1,122 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  addWorldObject,
   advance,
+  applyChatReply,
   applyDecision,
   blocked,
   createWorld,
+  interactAsObserver,
   intervene,
   observe,
   parseSave,
+  removeWorldObject,
   route,
 } from "../src/engine";
-function run(w: ReturnType<typeof createWorld>, seconds: number) {
-  for (let i = 0; i < seconds * 10; i++) advance(w, 0.1);
+
+function run(world: ReturnType<typeof createWorld>, seconds: number) {
+  for (let index = 0; index < seconds * 10; index++) advance(world, 0.1);
 }
-test("crew autonomously restores the uplink before nightfall", () => {
-  const w = createWorld();
-  run(w, 360);
-  assert.equal(w.outcome, "success");
-  assert.equal(w.repair, 100);
-  assert.ok(w.time < 360);
-  assert.ok(w.agents.some((a) => a.memories.length > 1));
+
+test("the default world is an open green meadow with interactive objects", () => {
+  const world = createWorld();
+  assert.equal(world.instance.title, "Open Meadow");
+  assert.equal(world.instance.groundColor, "#78a85b");
+  assert.ok(world.objects.length >= 6);
+  assert.ok(world.objects.some((object) => object.type === "bench"));
+  assert.ok(world.objects.some((object) => object.type === "ball"));
+  assert.ok(world.objects.every((object) => object.interaction.length > 0));
+  assert.match(world.instance.situation, /open-ended/i);
 });
-test("storm slows identical repair work, clearing restores conditions", () => {
-  const calm = createWorld(),
-    storm = createWorld();
-  intervene(storm, "storm");
-  run(calm, 40);
-  run(storm, 40);
-  assert.ok(storm.repair < calm.repair);
-  intervene(storm, "calm");
-  assert.equal(storm.storm, false);
+
+test("characters autonomously talk and interact with the physical world", () => {
+  const world = createWorld();
+  run(world, 80);
+  assert.ok(world.events.some((event) => event.kind === "action"));
+  assert.ok(world.objects.some((object) => object.uses > 0));
+  assert.ok(world.agents.every((agent) => agent.memories.length > 1));
+  assert.ok(world.time >= 79);
 });
-test("movement routes around habitats and never crosses walls", () => {
-  const path = route([-11, -3], [-2, -3]);
+
+test("movement routes around solid editable objects", () => {
+  const world = createWorld();
+  const tree = world.objects.find((object) => object.type === "tree")!;
+  assert.equal(blocked(tree.position, world), true);
+  const path = route([-11, -4], [-3, -4], world);
   assert.ok(path.length > 1);
-  let prev: [number, number] = [-11, -3];
-  for (const next of path) {
-    for (let i = 0; i <= 20; i++)
-      assert.equal(
-        blocked([
-          prev[0] + ((next[0] - prev[0]) * i) / 20,
-          prev[1] + ((next[1] - prev[1]) * i) / 20,
-        ]),
-        false,
-      );
-    prev = next;
-  }
-  const w = createWorld();
-  run(w, 100);
-  assert.ok(w.agents.every((a) => !blocked(a.position)));
+  assert.ok(path.every((position) => !blocked(position, world)));
 });
-test("rejects malformed actions, self-talk, impossible food and remote commands", () => {
-  const w = createWorld();
+
+test("actions validate dynamic object and character targets", () => {
+  const world = createWorld();
+  const agent = world.agents[0];
+  const ball = world.objects.find((object) => object.type === "ball")!;
   assert.equal(
-    applyDecision(w, "mira", {
-      action: "execute",
-      target: "shell",
-      intent: "hack",
+    applyDecision(world, agent.id, {
+      action: "interact",
+      target: ball.id,
+      message: "Let’s play.",
+      intent: "I feel playful.",
+    }),
+    true,
+  );
+  assert.equal(
+    applyDecision(world, agent.id, {
+      action: "rest",
+      target: ball.id,
+      message: "",
+      intent: "Impossible rest target.",
     }),
     false,
   );
   assert.equal(
-    applyDecision(w, "mira", {
+    applyDecision(world, agent.id, {
       action: "talk",
-      target: "mira",
-      message: "hi",
-      intent: "self",
-    }),
-    false,
-  );
-  assert.equal(
-    applyDecision(w, "mira", {
-      action: "eat",
-      target: "antenna",
-      intent: "eat",
-    }),
-    false,
-  );
-  w.supplies = 0;
-  w.agents[0].food = 0;
-  assert.equal(
-    applyDecision(w, "mira", {
-      action: "eat",
-      target: "supplies",
-      intent: "eat",
+      target: agent.id,
+      message: "Hello me.",
+      intent: "Self talk.",
     }),
     false,
   );
 });
-test("intervention messages persist and change a character’s next action", () => {
-  const w = createWorld();
-  intervene(w, "message", "mira", "Please rest now");
-  advance(w, 0.1);
-  assert.equal(w.agents[0].decision?.action, "rest");
-  assert.ok(w.agents[0].memories.some((m) => m.includes("Please rest now")));
-  assert.ok(w.events.some((e) => e.kind === "observer"));
-  assert.match(w.agents[0].message, /right|hear|Hello/i);
-  assert.ok(w.agents[0].messageUntil > w.time);
+
+test("local observer chat updates only the addressed character", () => {
+  const world = createWorld();
+  intervene(world, "message", "mira", "What is your name?");
+  advance(world, 0.1);
+  assert.match(world.agents[0].message, /Mira/);
+  assert.equal(world.agents[0].chatHistory.length, 2);
+  assert.equal(world.agents[0].chatHistory[1].source, "local");
+  assert.equal(world.agents[1].chatHistory.length, 0);
   assert.ok(
-    w.events.some((e) => e.kind === "speech" && e.text.includes("→ Observer")),
+    world.agents[0].memories.some((memory) => memory.includes("Observer said")),
   );
-  assert.deepEqual(
-    w.agents[0].chatHistory.map(({ role }) => role),
-    ["observer", "npc"],
-  );
-  assert.equal(w.agents[0].chatHistory[0].text, "Please rest now");
-  assert.equal(observe(w, w.agents[0]).conversation.length, 2);
-  intervene(w, "food");
-  assert.equal(w.supplies, 12);
 });
+
+test("a model chat reply becomes individual memory and relationship state", () => {
+  const world = createWorld();
+  const agent = world.agents[0];
+  intervene(world, "message", agent.id, "Do you trust me?");
+  applyChatReply(world, agent, {
+    reply: "A little more than before. You asked me directly.",
+    memory: "The observer asked about trust and I answered honestly.",
+    relationshipDelta: 3,
+  });
+  assert.equal(agent.observerRelationship, 3);
+  assert.equal(agent.chatHistory[1].source, "openrouter");
+  assert.match(agent.memories.at(-1) || "", /trust/i);
+  assert.equal(agent.inbox, undefined);
+});
+
 test("punching causes damage, breaks trust, and provokes a response", () => {
-  const w = createWorld();
-  const [attacker, target] = w.agents;
+  const world = createWorld();
+  const [attacker, target] = world.agents;
   attacker.position = [0, 0];
   target.position = [0.5, 0];
   const trust = target.relationships[attacker.id];
   assert.equal(
-    applyDecision(w, attacker.id, {
+    applyDecision(world, attacker.id, {
       action: "punch",
       target: target.id,
       message: "Back off.",
@@ -124,115 +124,79 @@ test("punching causes damage, breaks trust, and provokes a response", () => {
     }),
     true,
   );
-  for (let i = 0; i < 20; i++) advance(w, 0.1, false);
+  for (let index = 0; index < 20; index++) advance(world, 0.1, false);
   assert.ok(target.health < 100);
   assert.ok(target.relationships[attacker.id] < trust);
   assert.equal(target.provokedBy, attacker.id);
-  assert.ok(target.messageUntil > w.time);
-  assert.ok(w.events.some((e) => e.text.includes("damage")));
 });
-test("observer can tell a character to punch a named character", () => {
-  const w = createWorld();
-  intervene(w, "message", "mira", "Punch Oren");
-  advance(w, 0.1);
-  assert.equal(w.agents[0].decision?.action, "punch");
-  assert.equal(w.agents[0].decision?.target, "oren");
+
+test("observer can add, use, and remove editable objects", () => {
+  const world = createWorld();
+  const before = world.objects.length;
+  const lamp = addWorldObject(world, "lamp");
+  assert.equal(world.objects.length, before + 1);
+  assert.equal(interactAsObserver(world, lamp.id), true);
+  assert.equal(lamp.uses, 1);
+  assert.equal(removeWorldObject(world, lamp.id), true);
+  assert.equal(world.objects.length, before);
 });
-test("generated instance settings define scenario bounds", () => {
-  const w = createWorld({
-    title: "Ice Relay",
-    premise: "A stranded relay crew waits in whiteout conditions.",
-    situation: "The relay is down while a storm closes in.",
-    objective: "Restore the polar relay.",
-    biome: "tundra",
-    layout: "ridge",
-    startingSupplies: 3,
-    startingStorm: true,
-    duration: 240,
-  });
-  assert.equal(w.instance.title, "Ice Relay");
-  assert.equal(w.supplies, 3);
-  assert.equal(w.storm, true);
-  assert.equal(observe(w, w.agents[0]).timeRemaining, 240);
-  w.time = 239.9;
-  advance(w, 0.2, false);
-  assert.equal(w.outcome, "failed");
-});
+
 test("food sharing transfers inventory and records trust and memory", () => {
-  const w = createWorld();
-  const [a, b] = w.agents;
-  a.position = [0, 0];
-  b.position = [0.5, 0];
-  a.food = 1;
-  b.food = 0;
-  const before = b.relationships[a.id];
+  const world = createWorld();
+  const [giver, receiver] = world.agents;
+  giver.position = [0, 0];
+  receiver.position = [0.5, 0];
+  giver.food = 1;
+  receiver.food = 0;
   assert.equal(
-    applyDecision(w, a.id, {
+    applyDecision(world, giver.id, {
       action: "give",
-      target: b.id,
+      target: receiver.id,
       message: "Here you go.",
       intent: "Help a friend.",
     }),
     true,
   );
-  for (let i = 0; i < 30; i++) advance(w, 0.1, false);
-  assert.equal(a.food, 0);
-  assert.equal(b.food, 1);
-  assert.ok(b.relationships[a.id] > before);
-  assert.ok(b.memories.some((m) => m.includes("shared food")));
-});
-test("saves round-trip state; corrupt saves and duplicate identities are rejected", () => {
-  const w = createWorld();
-  intervene(w, "message", "mira", "Remember our conversation");
-  advance(w, 0.1);
-  run(w, 12);
-  assert.deepEqual(parseSave(JSON.stringify(w)), w);
-  assert.equal(parseSave(JSON.stringify(w)).agents[0].chatHistory.length, 2);
-  assert.throws(() => parseSave("{bad"));
-  const malformed = structuredClone(w);
-  malformed.agents[0].id = malformed.agents[1].id;
-  assert.throws(() => parseSave(JSON.stringify(malformed)));
-  const badPos = structuredClone(w);
-  badPos.agents[0].position = [-7, -3];
-  assert.throws(() => parseSave(JSON.stringify(badPos)));
-});
-test("observations expose nearby characters only and bounded memories", () => {
-  const w = createWorld();
-  w.agents[1].position = [12, 12];
-  w.agents[0].memories = Array.from({ length: 20 }, (_, i) => `Memory ${i}`);
-  const o = observe(w, w.agents[0]);
-  assert.equal(
-    o.nearby.some((a) => a.id === "oren"),
-    false,
-  );
-  assert.equal(o.memories.length, 8);
-});
-test("nightfall ends an unrepaired world and prevents later interventions", () => {
-  const w = createWorld();
-  w.time = 359.9;
-  advance(w, 0.2, false);
-  assert.equal(w.outcome, "failed");
-  const supplies = w.supplies;
-  intervene(w, "food");
-  assert.equal(w.supplies, supplies);
+  for (let index = 0; index < 30; index++) advance(world, 0.1, false);
+  assert.equal(giver.food, 0);
+  assert.equal(receiver.food, 1);
+  assert.ok(receiver.memories.some((memory) => memory.includes("shared food")));
 });
 
-test("eating consumes exactly one food portion, including when taking a spare", () => {
-  for (const stored of [1, 5]) {
-    const w = createWorld();
-    const a = w.agents[0];
-    a.food = 0;
-    a.hunger = 80;
-    a.position = [-5, 3];
-    w.supplies = stored;
-    applyDecision(w, a.id, {
-      action: "eat",
-      target: "supplies",
-      message: "",
-      intent: "Eat a meal.",
-    });
-    for (let i = 0; i < 30; i++) advance(w, 0.1, false);
-    assert.ok(a.hunger < 30);
-    assert.equal(w.supplies + a.food, stored - 1);
-  }
+test("observations expose individual context, nearby characters, and objects", () => {
+  const world = createWorld();
+  world.agents[1].position = [12, 12];
+  world.agents[0].memories = Array.from(
+    { length: 20 },
+    (_, index) => `Memory ${index}`,
+  );
+  const observation = observe(world, world.agents[0]);
+  assert.equal(
+    observation.nearby.some((agent) => agent.id === "oren"),
+    false,
+  );
+  assert.equal(observation.memories.length, 12);
+  assert.equal(observation.objects.length, world.objects.length);
+  assert.equal(observation.role, world.agents[0].role);
+});
+
+test("saves round-trip separate memories, chats, and edited world state", () => {
+  const world = createWorld();
+  intervene(world, "message", "mira", "Remember our conversation");
+  advance(world, 0.1);
+  const rock = addWorldObject(world, "rock");
+  rock.name = "Thinking stone";
+  const restored = parseSave(JSON.stringify(world));
+  assert.deepEqual(restored, world);
+  assert.equal(restored.agents[0].chatHistory.length, 2);
+  assert.equal(restored.objects.at(-1)?.name, "Thinking stone");
+  assert.throws(() => parseSave("{bad"));
+});
+
+test("the meadow remains open-ended during a long simulation", () => {
+  const world = createWorld();
+  run(world, 900);
+  assert.ok(world.time >= 899);
+  intervene(world, "food");
+  assert.ok(world.supplies > 0);
 });

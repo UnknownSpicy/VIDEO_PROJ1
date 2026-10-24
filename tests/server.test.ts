@@ -57,10 +57,10 @@ test("a browser session key is forwarded to OpenRouter without being exposed by 
           {
             message: {
               content: JSON.stringify({
-                action: "repair",
-                target: "antenna",
-                message: "",
-                intent: "Restore the uplink.",
+                action: "interact",
+                target: "red-ball",
+                message: "Let’s play.",
+                intent: "Explore the meadow.",
               }),
             },
           },
@@ -109,6 +109,54 @@ test("a browser session key is forwarded to OpenRouter without being exposed by 
   }
 });
 
+test("direct character chat returns a validated reply with memory and relationship change", async () => {
+  const previous = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = "test-only-not-a-real-key";
+  let payload: { messages?: { content: string }[] } = {};
+  const provider = async (_input: unknown, init?: RequestInit) => {
+    payload = JSON.parse(String(init?.body));
+    return new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                reply: "I’m Mira. I want to understand this place.",
+                memory: "The observer asked who I am.",
+                relationshipDelta: 2,
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  };
+  const server = createApp(provider as typeof fetch).listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const world = createWorld();
+    world.agents[0].inbox = "Who are you?";
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ observation: observe(world, world.agents[0]) }),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.reply.relationshipDelta, 2);
+    assert.match(result.reply.reply, /Mira/);
+    assert.match(payload.messages?.[0]?.content || "", /individual memory/i);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (previous) process.env.OPENROUTER_API_KEY = previous;
+    else delete process.env.OPENROUTER_API_KEY;
+  }
+});
+
 test("provider integration returns a validated decision and rejects malformed model output", async () => {
   const previous = process.env.OPENROUTER_API_KEY;
   process.env.OPENROUTER_API_KEY = "test-only-not-a-real-key";
@@ -122,10 +170,10 @@ test("provider integration returns a validated decision and rejects malformed mo
             message: {
               content: `Here is the requested action:\n\`\`\`json\n${JSON.stringify(
                 {
-                  action: "repair",
-                  target: "antenna",
-                  message: "",
-                  intent: "Get the uplink working.",
+                  action: "interact",
+                  target: "red-ball",
+                  message: "Let’s see where it rolls.",
+                  intent: "I feel playful.",
                 },
               )}\n\`\`\``,
             },
@@ -150,7 +198,7 @@ test("provider integration returns a validated decision and rejects malformed mo
       }),
     });
     assert.equal(res.status, 200);
-    assert.equal((await res.json()).decision.action, "repair");
+    assert.equal((await res.json()).decision.action, "interact");
     assert.equal(payload?.model, "test/model");
     assert.equal(payload?.max_tokens, 250);
     const limited = await fetch(`http://127.0.0.1:${address.port}/api/decide`, {
@@ -214,15 +262,43 @@ test("world generation returns only a validated bounded instance plan", async ()
           {
             message: {
               content: JSON.stringify({
-                title: "Ice Relay",
-                premise: "Three researchers are isolated in a polar relay.",
-                situation: "A whiteout surrounds a damaged radio mast.",
-                objective: "Restore contact before the whiteout peaks.",
-                biome: "tundra",
-                layout: "ridge",
+                title: "Ice Garden",
+                premise: "Three people explore a quiet frozen garden.",
+                situation: "The garden is open-ended and calm.",
+                objective: "Explore the garden and build relationships.",
+                groundColor: "#aebfba",
+                skyColor: "#c4d0d3",
                 startingSupplies: 5,
-                startingStorm: true,
-                duration: 300,
+                startingStorm: false,
+                objects: [
+                  {
+                    id: "ice-tree",
+                    type: "tree",
+                    name: "Ice tree",
+                    position: [-5, -3],
+                    color: "#78908a",
+                    scale: 1,
+                    interaction: "Inspect its frozen branches.",
+                  },
+                  {
+                    id: "warm-bench",
+                    type: "bench",
+                    name: "Warm bench",
+                    position: [4, 3],
+                    color: "#8b755c",
+                    scale: 1,
+                    interaction: "Sit and rest.",
+                  },
+                  {
+                    id: "food-crate",
+                    type: "crate",
+                    name: "Food crate",
+                    position: [-3, 4],
+                    color: "#ad8558",
+                    scale: 1,
+                    interaction: "Take food.",
+                  },
+                ],
               }),
             },
           },
@@ -249,8 +325,8 @@ test("world generation returns only a validated bounded instance plan", async ()
     );
     assert.equal(response.status, 200);
     const data = await response.json();
-    assert.equal(data.instance.biome, "tundra");
-    assert.equal(data.instance.layout, "ridge");
+    assert.equal(data.instance.groundColor, "#aebfba");
+    assert.equal(data.instance.objects.length, 3);
     assert.match(prompt, /polar communications/);
   } finally {
     server.closeAllConnections();
@@ -304,6 +380,13 @@ test("model catalog separates compatible free and credit models and connection t
               pricing: { prompt: "0", completion: "0" },
               supported_parameters: ["temperature"],
             },
+            {
+              id: "example/audio-only",
+              name: "Audio only",
+              pricing: { prompt: "0", completion: "0" },
+              supported_parameters: ["response_format"],
+              architecture: { output_modalities: ["audio"] },
+            },
           ],
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -316,7 +399,14 @@ test("model catalog separates compatible free and credit models and connection t
     );
     return new Response(
       JSON.stringify({
-        choices: [{ message: { content: '{"ok":true}' } }],
+        choices: [
+          {
+            message: {
+              content:
+                '{"reply":"Hello.","memory":"The observer greeted me.","relationshipDelta":1}',
+            },
+          },
+        ],
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );

@@ -10,13 +10,11 @@ import {
   Download,
   Eye,
   EyeOff,
-  Flag,
   Leaf,
   MessageSquare,
   Pause,
   Play,
   Plus,
-  Radio,
   RefreshCw,
   RotateCcw,
   Save,
@@ -30,24 +28,35 @@ import {
   Volume2,
   Wifi,
   Users,
+  Boxes,
+  Brain,
+  Pencil,
   X,
 } from "lucide-react";
 import WorldView from "./World";
 import {
   advance,
+  addWorldObject,
+  applyChatReply,
   applyDecision,
   clock,
   createWorld,
   intervene,
+  interactAsObserver,
   localDecision,
   log,
   observe,
   parseSave,
-  recordNpcReply,
+  removeWorldObject,
   type World,
 } from "./engine";
-import { decisionSchema, instancePlanSchema } from "./contracts";
-const SAVE_KEY = "sim-proj1-world-v1";
+import {
+  chatReplySchema,
+  decisionSchema,
+  instancePlanSchema,
+  objectTypes,
+} from "./contracts";
+const SAVE_KEY = "sim-proj1-world-v2";
 const OPENROUTER_SESSION_KEY = "sim-proj1-openrouter-key";
 const VOICE_KEY = "sim-proj1-voice-settings";
 const SETTINGS_KEY = "sim-proj1-settings-v1";
@@ -149,7 +158,7 @@ function ModelPicker({
     </div>
   );
 }
-type Panel = "agents" | "intervene" | "journal" | "settings" | null;
+type Panel = "agents" | "world" | "intervene" | "journal" | "settings" | null;
 export default function App() {
   const world = useRef<World>(createWorld());
   const [snapshot, setSnapshot] = useState(world.current);
@@ -157,6 +166,7 @@ export default function App() {
   const pausedRef = useRef(false);
   const [speed, setSpeed] = useState(1);
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedObject, setSelectedObject] = useState<string | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
   const [cameraReset, setCameraReset] = useState(0);
   const [message, setMessage] = useState("");
@@ -175,11 +185,16 @@ export default function App() {
     () => readSavedSettings().model || "openai/gpt-4o-mini",
   );
   const [thinking, setThinking] = useState<string | null>(null);
+  const [chatting, setChatting] = useState<string | null>(null);
+  const [chatError, setChatError] = useState("");
+  const [editingAgent, setEditingAgent] = useState(false);
+  const [newObjectType, setNewObjectType] =
+    useState<(typeof objectTypes)[number]>("tree");
   const [aiError, setAiError] = useState("");
   const [worldPrompt, setWorldPrompt] = useState(
     () =>
       readSavedSettings().worldPrompt ||
-      "A small isolated research habitat where three people must restore communications before nightfall.",
+      "A peaceful green meadow with useful and playful objects where three distinct people can explore, talk, and form relationships.",
   );
   const [models, setModels] = useState<OpenRouterModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -215,7 +230,6 @@ export default function App() {
     }
   });
   const [resetConfirm, setResetConfirm] = useState(false);
-  const [resultHidden, setResultHidden] = useState(false);
   const generation = useRef(0),
     roundRobin = useRef(0),
     busy = useRef(false),
@@ -342,6 +356,7 @@ export default function App() {
           for (const a of world.current.agents)
             if (
               !a.decision &&
+              !a.inbox &&
               a.cooldown <= 0 &&
               thinking !== a.id &&
               now - lastAi.current < 8000
@@ -370,11 +385,14 @@ export default function App() {
       if (
         pausedRef.current ||
         busy.current ||
-        w.outcome !== "running" ||
-        performance.now() - lastAi.current < 8000
+        performance.now() - lastAi.current < 12000
       )
         return;
-      const agent = w.agents[roundRobin.current++ % 3];
+      const candidates = w.agents.filter(
+        (candidate) => !candidate.inbox && candidate.id !== chatting,
+      );
+      if (!candidates.length) return;
+      const agent = candidates[roundRobin.current++ % candidates.length];
       const token = generation.current;
       const capturedInbox = agent.inbox;
       busy.current = true;
@@ -403,14 +421,6 @@ export default function App() {
           throw Error(
             "The requested action is not possible right now. Local behavior will continue.",
           );
-        if (capturedInbox) {
-          const reply =
-            d.message.trim() ||
-            "I hear you. I’ll keep that in mind as I decide what to do.";
-          recordNpcReply(w, agent, reply);
-          if (agent.decision) agent.decision.message = "";
-        }
-        delete agent.inbox;
         setAiError("");
         log(w, "system", `${agent.name} chose to ${d.action} · OpenRouter`);
       } catch (e) {
@@ -427,7 +437,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(timer);
-  }, [mode, paused, model, apiKey, connectionTest.state]);
+  }, [mode, paused, model, apiKey, connectionTest.state, chatting]);
   useEffect(() => {
     lastEvent.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [snapshot.sequence, panel]);
@@ -454,7 +464,14 @@ export default function App() {
   }, []);
   const choose = (id: string) => {
     setSelected(id);
+    setSelectedObject(null);
+    setEditingAgent(false);
     setPanel("agents");
+  };
+  const chooseObject = (id: string) => {
+    setSelectedObject(id);
+    setSelected(null);
+    setPanel("world");
   };
   const toggle = (p: Panel) => setPanel((old) => (old === p ? null : p));
   const intervention = (type: "food" | "storm" | "calm") => {
@@ -548,7 +565,6 @@ export default function App() {
       const w = parseSave(raw);
       generation.current++;
       world.current = w;
-      setResultHidden(false);
       setPaused(true);
       refresh();
       notify("Saved experiment restored and paused.");
@@ -576,7 +592,6 @@ export default function App() {
       const w = parseSave(await file.text());
       generation.current++;
       world.current = w;
-      setResultHidden(false);
       setPaused(true);
       refresh();
       notify("Experiment imported and paused.");
@@ -587,10 +602,11 @@ export default function App() {
   const reset = () => {
     generation.current++;
     world.current = createWorld();
+    setSelected(null);
+    setSelectedObject(null);
     lastAi.current = 0;
     setPaused(false);
     setResetConfirm(false);
-    setResultHidden(false);
     setAiError("");
     refresh();
     notify("A new day begins.");
@@ -616,7 +632,7 @@ export default function App() {
       world.current = createWorld(instance);
       spokenUntil.current = {};
       setSelected(null);
-      setResultHidden(false);
+      setSelectedObject(null);
       setPaused(true);
       refresh();
       notify(`${instance.title} created and paused for review.`);
@@ -631,9 +647,25 @@ export default function App() {
     generation.current++;
     refresh();
   };
+  const updateWorldText = (
+    field: "title" | "premise" | "objective" | "groundColor" | "skyColor",
+    value: string,
+  ) => {
+    if (field === "groundColor" || field === "skyColor") {
+      if (/^#[0-9a-f]{6}$/i.test(value)) world.current.instance[field] = value;
+    } else {
+      world.current.instance[field] = value.slice(
+        0,
+        field === "title" ? 50 : field === "objective" ? 160 : 600,
+      );
+    }
+    generation.current++;
+    refresh();
+  };
   const updateCharacter = (
     id: string,
-    field: "personality" | "goal" | "memories" | "memoryLimit",
+    field:
+      "name" | "role" | "personality" | "goal" | "memories" | "memoryLimit",
     value: string | number,
   ) => {
     const target = world.current.agents.find(
@@ -649,27 +681,112 @@ export default function App() {
     else if (field === "memoryLimit") {
       target.memoryLimit = Math.max(4, Math.min(30, Number(value)));
       target.memories = target.memories.slice(-target.memoryLimit);
-    } else target[field] = String(value).slice(0, field === "goal" ? 300 : 500);
+    } else
+      target[field] = String(value).slice(
+        0,
+        field === "goal"
+          ? 300
+          : field === "name"
+            ? 40
+            : field === "role"
+              ? 80
+              : 500,
+      );
     generation.current++;
     refresh();
   };
-  const send = () => {
-    if (!message.trim() || !selected) return;
-    generation.current++;
-    intervene(world.current, "message", selected, message);
-    setMessage("");
-    refresh();
-    notify(
-      paused
-        ? "Message delivered. Resume to see the response."
-        : "Message delivered.",
+  const updateObject = (
+    id: string,
+    field: "name" | "type" | "color" | "scale" | "x" | "z" | "interaction",
+    value: string | number,
+  ) => {
+    const object = world.current.objects.find(
+      (candidate) => candidate.id === id,
     );
+    if (!object) return;
+    if (field === "x" || field === "z") {
+      const index = field === "x" ? 0 : 1;
+      const limit = field === "x" ? 13 : 12;
+      object.position[index] = Math.max(-limit, Math.min(limit, Number(value)));
+    } else if (field === "scale") {
+      object.scale = Math.max(0.35, Math.min(3, Number(value)));
+    } else if (field === "type") {
+      const parsed = objectTypes.find((type) => type === value);
+      if (parsed) object.type = parsed;
+    } else if (field === "color") {
+      if (/^#[0-9a-f]{6}$/i.test(String(value))) object.color = String(value);
+    } else {
+      object[field] = String(value).slice(0, field === "name" ? 60 : 180);
+    }
+    world.current.instance.objects = world.current.objects.map(
+      ({ uses: _uses, ...plan }) => plan,
+    );
+    generation.current++;
+    refresh();
+  };
+  const send = async () => {
+    if (!message.trim() || !selected) return;
+    const targetId = selected;
+    const sent = message.trim();
+    generation.current++;
+    intervene(world.current, "message", targetId, sent);
+    setMessage("");
+    setChatError("");
+    refresh();
+    const target = world.current.agents.find(
+      (candidate) => candidate.id === targetId,
+    );
+    if (!target) return;
+    if (mode === "local" || !providerReady) {
+      const decision = localDecision(world.current, target);
+      applyDecision(world.current, target.id, decision);
+      refresh();
+      notify(
+        "Local simulation replied. Connect OpenRouter for model conversation.",
+      );
+      return;
+    }
+    setChatting(targetId);
+    lastAi.current = performance.now();
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(apiKey ? { "X-OpenRouter-Key": apiKey } : {}),
+        },
+        body: JSON.stringify({
+          model,
+          observation: observe(world.current, target),
+        }),
+        signal: AbortSignal.timeout(28000),
+      });
+      const data = await response.json();
+      if (!response.ok)
+        throw Error(data.error || "The character could not reply.");
+      applyChatReply(world.current, target, chatReplySchema.parse(data.reply));
+      setAiError("");
+      notify(`${target.name} replied using ${model}.`);
+    } catch (error) {
+      delete target.inbox;
+      const text =
+        error instanceof Error
+          ? error.message
+          : "The character could not reply.";
+      setChatError(text);
+      setAiError(text);
+    } finally {
+      setChatting(null);
+      refresh();
+    }
   };
   const agent = snapshot.agents.find((a) => a.id === selected);
-  const ended = snapshot.outcome !== "running";
   const sessionKeyReady = apiKey.startsWith("sk-or-") && apiKey.length >= 24;
   const providerReady = configured || sessionKeyReady;
   const editableAgent = snapshot.agents.find((a) => a.id === contextAgent)!;
+  const editableObject = snapshot.objects.find(
+    (object) => object.id === selectedObject,
+  );
   const speechSupported = "speechSynthesis" in window;
   return (
     <main className="app">
@@ -677,7 +794,9 @@ export default function App() {
         <WorldView
           world={snapshot}
           selected={selected}
+          selectedObject={selectedObject}
           onSelect={choose}
+          onSelectObject={chooseObject}
           cameraReset={cameraReset}
         />
       </div>
@@ -690,7 +809,7 @@ export default function App() {
             SIM <span>PROJ1</span>
             <span className="alpha">PROTOTYPE 01</span>
           </div>
-          <div className="eyebrow">FIELD STATION / OBSERVER MODE</div>
+          <div className="eyebrow">LIVING WORLD / OBSERVER MODE</div>
         </div>
       </header>
       <div className="session">
@@ -708,24 +827,21 @@ export default function App() {
       <section className="mission">
         <div className="mission-top">
           <span className="mission-icon">
-            <Radio size={20} />
+            <Boxes size={20} />
           </span>
           <div>
             <div className="eyebrow">SHARED OBJECTIVE</div>
             <h1>{snapshot.instance.objective}</h1>
           </div>
         </div>
-        <div className="mission-progress">
-          <div style={{ width: `${snapshot.repair}%` }} />
-        </div>
         <div className="mission-meta">
-          <span>UPLINK REPAIR</span>
+          <span>LIVE EDITABLE WORLD</span>
           <strong>
-            {Math.floor(snapshot.repair)}
-            <small>%</small>
+            {snapshot.objects.length}
+            <small> objects</small>
           </strong>
           <span className="deadline">
-            <Sun size={13} /> BEFORE {clock(snapshot.instance.duration)}
+            <Sun size={13} /> OPEN ENDED
           </span>
         </div>
       </section>
@@ -734,8 +850,8 @@ export default function App() {
         <span className="station-name">{snapshot.instance.premise}</span>
         <span className="stamp-rule" />
         <span className="eyebrow">
-          3 CHARACTERS · {snapshot.instance.biome.toUpperCase()} ·{" "}
-          {snapshot.instance.layout.toUpperCase()}
+          3 CHARACTERS · {snapshot.objects.length} INTERACTIVE OBJECTS · LIVE
+          EDITING
         </span>
       </aside>
       <div className="compass">
@@ -750,6 +866,14 @@ export default function App() {
           <Users size={18} />
           <span>Characters</span>
           <b>03</b>
+        </button>
+        <button
+          className={panel === "world" ? "active" : ""}
+          onClick={() => toggle("world")}
+        >
+          <Boxes size={18} />
+          <span>Edit world</span>
+          <b>{String(snapshot.objects.length).padStart(2, "0")}</b>
         </button>
         <button
           className={panel === "intervene" ? "active" : ""}
@@ -777,7 +901,6 @@ export default function App() {
           className="icon-button play"
           onClick={() => setPaused((v) => !v)}
           aria-label={paused ? "Resume simulation" : "Pause simulation"}
-          disabled={ended}
         >
           {paused ? <Play size={18} /> : <Pause size={18} />}
         </button>
@@ -813,13 +936,11 @@ export default function App() {
       <div className="world-status">
         <span className="tiny-dot" />
         <span>
-          {ended
-            ? "EXPERIMENT COMPLETE"
-            : paused
-              ? "SIMULATION PAUSED"
-              : thinking
-                ? `${snapshot.agents.find((a) => a.id === thinking)?.name.toUpperCase()} IS DECIDING…`
-                : "WORLD IS RUNNING"}
+          {paused
+            ? "SIMULATION PAUSED"
+            : thinking
+              ? `${snapshot.agents.find((a) => a.id === thinking)?.name.toUpperCase()} IS DECIDING…`
+              : "WORLD IS RUNNING"}
         </span>
         <span className="status-separator">/</span>
         <span>{snapshot.supplies} FOOD IN STORAGE</span>
@@ -830,22 +951,26 @@ export default function App() {
           aria-label={
             panel === "agents"
               ? "Characters panel"
-              : panel === "intervene"
-                ? "Intervention panel"
-                : panel === "journal"
-                  ? "Event journal"
-                  : "Settings panel"
+              : panel === "world"
+                ? "World editor"
+                : panel === "intervene"
+                  ? "Intervention panel"
+                  : panel === "journal"
+                    ? "Event journal"
+                    : "Settings panel"
           }
         >
           <div className="panel-top">
             <span className="eyebrow">
               {panel === "agents"
-                ? "THE PEOPLE OF STATION 01"
-                : panel === "intervene"
-                  ? "A SMALL CHANGE CAN MATTER"
-                  : panel === "journal"
-                    ? "THE STORY SO FAR"
-                    : "EXPERIMENT SETTINGS"}
+                ? "THE PEOPLE OF THE MEADOW"
+                : panel === "world"
+                  ? "EDIT THE WORLD WHILE IT RUNS"
+                  : panel === "intervene"
+                    ? "A SMALL CHANGE CAN MATTER"
+                    : panel === "journal"
+                      ? "THE STORY SO FAR"
+                      : "EXPERIMENT SETTINGS"}
             </span>
             <button
               className="icon-button"
@@ -951,8 +1076,145 @@ export default function App() {
                     <p>{agent.personality}</p>
                     <p>{agent.goal}</p>
                   </details>
+                  <button
+                    className="edit-character-button"
+                    onClick={() => setEditingAgent((value) => !value)}
+                  >
+                    <Pencil size={15} />
+                    {editingAgent
+                      ? "Close character editor"
+                      : "Edit this character"}
+                  </button>
+                  {editingAgent && (
+                    <section
+                      className="character-editor"
+                      aria-label={`Edit ${agent.name}`}
+                    >
+                      <div className="editor-heading">
+                        <Brain size={16} />
+                        <strong>Individual configuration</strong>
+                      </div>
+                      <label htmlFor="agent-name">Name</label>
+                      <input
+                        id="agent-name"
+                        value={agent.name}
+                        maxLength={40}
+                        onChange={(event) =>
+                          updateCharacter(agent.id, "name", event.target.value)
+                        }
+                      />
+                      <label htmlFor="agent-role">Role</label>
+                      <input
+                        id="agent-role"
+                        value={agent.role}
+                        maxLength={80}
+                        onChange={(event) =>
+                          updateCharacter(agent.id, "role", event.target.value)
+                        }
+                      />
+                      <label htmlFor="agent-personality">
+                        Personality and context
+                      </label>
+                      <textarea
+                        id="agent-personality"
+                        value={agent.personality}
+                        maxLength={500}
+                        rows={5}
+                        onChange={(event) =>
+                          updateCharacter(
+                            agent.id,
+                            "personality",
+                            event.target.value,
+                          )
+                        }
+                      />
+                      <label htmlFor="agent-goal">Personal goal</label>
+                      <textarea
+                        id="agent-goal"
+                        value={agent.goal}
+                        maxLength={300}
+                        rows={3}
+                        onChange={(event) =>
+                          updateCharacter(agent.id, "goal", event.target.value)
+                        }
+                      />
+                      <div className="memory-heading">
+                        <label htmlFor="agent-memories">
+                          Individual memories
+                        </label>
+                        <label htmlFor="agent-memory-limit">
+                          Limit
+                          <input
+                            id="agent-memory-limit"
+                            type="number"
+                            min={4}
+                            max={30}
+                            value={agent.memoryLimit}
+                            onChange={(event) =>
+                              updateCharacter(
+                                agent.id,
+                                "memoryLimit",
+                                event.target.value,
+                              )
+                            }
+                          />
+                        </label>
+                      </div>
+                      <textarea
+                        id="agent-memories"
+                        className="memories-editor"
+                        value={agent.memories.join("\n")}
+                        rows={8}
+                        onChange={(event) =>
+                          updateCharacter(
+                            agent.id,
+                            "memories",
+                            event.target.value,
+                          )
+                        }
+                      />
+                      <div className="editor-actions">
+                        <button
+                          className="settings-save"
+                          onClick={() =>
+                            saveSettings(
+                              `${agent.name}'s individual configuration saved.`,
+                              true,
+                            )
+                          }
+                        >
+                          <Save size={15} /> Save {agent.name}
+                        </button>
+                        <button
+                          onClick={() =>
+                            updateCharacter(agent.id, "memories", "")
+                          }
+                          disabled={agent.memories.length === 0}
+                        >
+                          <Trash2 size={14} /> Clear memory
+                        </button>
+                      </div>
+                      <p className="micro">
+                        This memory belongs only to {agent.name}. It is sent
+                        with future chat and decisions for this character.
+                      </p>
+                    </section>
+                  )}
                   <details>
                     <summary>Relationships</summary>
+                    <div className="relation">
+                      <span>You · observer</span>
+                      <span>
+                        {agent.observerRelationship >= 40
+                          ? "Trusted"
+                          : agent.observerRelationship > 0
+                            ? "Warming up"
+                            : agent.observerRelationship < -20
+                              ? "Distrustful"
+                              : "Neutral"}{" "}
+                        · {agent.observerRelationship}
+                      </span>
+                    </div>
                     {Object.entries(agent.relationships).map(([id, value]) => (
                       <div className="relation" key={id}>
                         <span>
@@ -1008,12 +1270,22 @@ export default function App() {
                             {entry.role === "observer" ? "You" : agent.name}
                           </span>
                           <p>{entry.text}</p>
-                          <time>{clock(entry.time)}</time>
+                          <time>
+                            {clock(entry.time)}
+                            {entry.role === "npc" && entry.source
+                              ? ` · ${entry.source === "openrouter" ? "AI" : "local"}`
+                              : ""}
+                          </time>
                         </div>
                       ))}
-                      {agent.inbox && (
+                      {chatting === agent.id && (
                         <div className="chat-typing">
-                          {agent.name} is considering your message…
+                          {agent.name} is replying through {model}…
+                        </div>
+                      )}
+                      {chatError && selected === agent.id && (
+                        <div className="chat-error" role="alert">
+                          {chatError}
                         </div>
                       )}
                       <div ref={chatEnd} />
@@ -1035,25 +1307,303 @@ export default function App() {
                           maxLength={400}
                           onChange={(e) => setMessage(e.target.value)}
                           placeholder="Write a message…"
-                          disabled={ended || !!agent.inbox}
+                          disabled={chatting === agent.id}
                         />
                         <button
                           className="icon-button"
                           aria-label="Send message"
-                          disabled={!message.trim() || ended || !!agent.inbox}
+                          disabled={!message.trim() || chatting === agent.id}
                         >
                           <Send size={17} />
                         </button>
                       </div>
                       <span className="micro">
                         {mode === "local"
-                          ? "Local replies use rules; your message still updates memory and behavior."
-                          : "OpenRouter receives recent chat, personality, memories, and world context."}
+                          ? "Local rules reply immediately. Switch to OpenRouter for model conversation."
+                          : `Direct AI chat is active through ${model}. Replies update only ${agent.name}’s memory and relationship with you.`}
                       </span>
                     </form>
                   </section>
                 </>
               )}
+            </>
+          )}
+          {panel === "world" && (
+            <>
+              <h2>Edit the living world.</h2>
+              <p className="muted intro">
+                Every change appears in the 3D scene immediately and becomes
+                part of what the characters can perceive.
+              </p>
+              <div className="world-editor-section">
+                <span className="eyebrow">WORLD IDENTITY</span>
+                <label htmlFor="world-title">Name</label>
+                <input
+                  id="world-title"
+                  value={snapshot.instance.title}
+                  maxLength={50}
+                  onChange={(event) =>
+                    updateWorldText("title", event.target.value)
+                  }
+                />
+                <label htmlFor="world-premise">Description</label>
+                <textarea
+                  id="world-premise"
+                  value={snapshot.instance.premise}
+                  maxLength={600}
+                  rows={3}
+                  onChange={(event) =>
+                    updateWorldText("premise", event.target.value)
+                  }
+                />
+                <label htmlFor="world-objective">Shared context</label>
+                <textarea
+                  id="world-objective"
+                  value={snapshot.instance.objective}
+                  maxLength={160}
+                  rows={2}
+                  onChange={(event) =>
+                    updateWorldText("objective", event.target.value)
+                  }
+                />
+                <label htmlFor="world-situation">Current situation</label>
+                <textarea
+                  id="world-situation"
+                  value={snapshot.instance.situation}
+                  maxLength={600}
+                  rows={4}
+                  onChange={(event) => updateSituation(event.target.value)}
+                />
+                <div className="color-grid">
+                  <label htmlFor="ground-color">
+                    Grass color
+                    <input
+                      id="ground-color"
+                      type="color"
+                      value={snapshot.instance.groundColor}
+                      onChange={(event) =>
+                        updateWorldText("groundColor", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label htmlFor="sky-color">
+                    Sky color
+                    <input
+                      id="sky-color"
+                      type="color"
+                      value={snapshot.instance.skyColor}
+                      onChange={(event) =>
+                        updateWorldText("skyColor", event.target.value)
+                      }
+                    />
+                  </label>
+                </div>
+              </div>
+              <div className="world-editor-section">
+                <div className="editor-heading">
+                  <Boxes size={16} />
+                  <strong>Physical objects</strong>
+                  <small>{snapshot.objects.length}/24</small>
+                </div>
+                <div className="add-object-row">
+                  <select
+                    aria-label="New object type"
+                    value={newObjectType}
+                    onChange={(event) =>
+                      setNewObjectType(
+                        event.target.value as (typeof objectTypes)[number],
+                      )
+                    }
+                  >
+                    {objectTypes.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    disabled={snapshot.objects.length >= 24}
+                    onClick={() => {
+                      const object = addWorldObject(
+                        world.current,
+                        newObjectType,
+                      );
+                      setSelectedObject(object.id);
+                      refresh();
+                    }}
+                  >
+                    <Plus size={15} /> Add object
+                  </button>
+                </div>
+                <div className="object-list" aria-label="World objects">
+                  {snapshot.objects.map((object) => (
+                    <button
+                      key={object.id}
+                      className={selectedObject === object.id ? "active" : ""}
+                      onClick={() => setSelectedObject(object.id)}
+                    >
+                      <span>{object.name}</span>
+                      <small>
+                        {object.type} · used {object.uses}×
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {editableObject && (
+                <div className="world-editor-section object-editor">
+                  <span className="eyebrow">EDIT SELECTED OBJECT</span>
+                  <label htmlFor="object-name">Name</label>
+                  <input
+                    id="object-name"
+                    value={editableObject.name}
+                    maxLength={60}
+                    onChange={(event) =>
+                      updateObject(
+                        editableObject.id,
+                        "name",
+                        event.target.value,
+                      )
+                    }
+                  />
+                  <label htmlFor="object-type">Type</label>
+                  <select
+                    id="object-type"
+                    value={editableObject.type}
+                    onChange={(event) =>
+                      updateObject(
+                        editableObject.id,
+                        "type",
+                        event.target.value,
+                      )
+                    }
+                  >
+                    {objectTypes.map((type) => (
+                      <option key={type}>{type}</option>
+                    ))}
+                  </select>
+                  <div className="transform-grid">
+                    <label htmlFor="object-x">
+                      X
+                      <input
+                        id="object-x"
+                        type="number"
+                        min={-13}
+                        max={13}
+                        step={0.5}
+                        value={editableObject.position[0]}
+                        onChange={(event) =>
+                          updateObject(
+                            editableObject.id,
+                            "x",
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                    <label htmlFor="object-z">
+                      Z
+                      <input
+                        id="object-z"
+                        type="number"
+                        min={-12}
+                        max={12}
+                        step={0.5}
+                        value={editableObject.position[1]}
+                        onChange={(event) =>
+                          updateObject(
+                            editableObject.id,
+                            "z",
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                    <label htmlFor="object-scale">
+                      Scale
+                      <input
+                        id="object-scale"
+                        type="number"
+                        min={0.35}
+                        max={3}
+                        step={0.05}
+                        value={editableObject.scale}
+                        onChange={(event) =>
+                          updateObject(
+                            editableObject.id,
+                            "scale",
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                    <label htmlFor="object-color">
+                      Color
+                      <input
+                        id="object-color"
+                        type="color"
+                        value={editableObject.color}
+                        onChange={(event) =>
+                          updateObject(
+                            editableObject.id,
+                            "color",
+                            event.target.value,
+                          )
+                        }
+                      />
+                    </label>
+                  </div>
+                  <label htmlFor="object-interaction">
+                    What people can do with it
+                  </label>
+                  <textarea
+                    id="object-interaction"
+                    value={editableObject.interaction}
+                    maxLength={180}
+                    rows={3}
+                    onChange={(event) =>
+                      updateObject(
+                        editableObject.id,
+                        "interaction",
+                        event.target.value,
+                      )
+                    }
+                  />
+                  <div className="editor-actions">
+                    <button
+                      onClick={() => {
+                        interactAsObserver(world.current, editableObject.id);
+                        refresh();
+                        notify(`You interacted with ${editableObject.name}.`);
+                      }}
+                    >
+                      <Sparkles size={14} /> Interact now
+                    </button>
+                    <button
+                      className="danger-button"
+                      disabled={snapshot.objects.length <= 3}
+                      onClick={() => {
+                        if (
+                          removeWorldObject(world.current, editableObject.id)
+                        ) {
+                          setSelectedObject(null);
+                          refresh();
+                        }
+                      }}
+                    >
+                      <Trash2 size={14} /> Remove
+                    </button>
+                  </div>
+                </div>
+              )}
+              <button
+                className="settings-save"
+                onClick={() =>
+                  saveSettings("World layout and objects saved.", true)
+                }
+              >
+                <Save size={15} /> Save world
+              </button>
             </>
           )}
           {panel === "intervene" && (
@@ -1066,7 +1616,6 @@ export default function App() {
               <button
                 className="intervention"
                 onClick={() => intervention("food")}
-                disabled={ended}
               >
                 <span className="action-symbol">
                   <Plus size={23} />
@@ -1080,7 +1629,6 @@ export default function App() {
               <button
                 className="intervention"
                 onClick={() => intervention(snapshot.storm ? "calm" : "storm")}
-                disabled={ended}
               >
                 <span className="action-symbol">
                   {snapshot.storm ? (
@@ -1095,7 +1643,7 @@ export default function App() {
                   </strong>
                   <small>
                     {snapshot.storm
-                      ? "Restore normal travel and repairs."
+                      ? "Restore calm movement and outdoor activity."
                       : "Slow movement and outdoor work."}
                   </small>
                 </span>
@@ -1107,7 +1655,6 @@ export default function App() {
                   setPanel("agents");
                   setSelected(null);
                 }}
-                disabled={ended}
               >
                 <span className="action-symbol">
                   <MessageSquare size={23} />
@@ -1184,8 +1731,8 @@ export default function App() {
                   <Save size={15} /> Save world prompt
                 </button>
                 <p className="micro">
-                  The model creates a validated plan using one of three compact
-                  layouts and biomes. Creating it starts a new paused world and
+                  The model creates a validated editable world with colors and
+                  interactive objects. Creating it starts a new paused world and
                   replaces unsaved progress.
                 </p>
               </div>
@@ -1611,42 +2158,6 @@ export default function App() {
         <button className="ai-warning" onClick={() => setPanel("settings")}>
           AI unavailable · local behavior continues <ChevronRight size={14} />
         </button>
-      )}
-      {ended && !resultHidden && (
-        <div className="outcome" role="dialog" aria-label="Experiment result">
-          <span className="outcome-icon">
-            {snapshot.outcome === "success" ? (
-              <Radio size={30} />
-            ) : (
-              <Flag size={30} />
-            )}
-          </span>
-          <div className="eyebrow">DAY 01 / EXPERIMENT COMPLETE</div>
-          <h2>
-            {snapshot.outcome === "success"
-              ? "A signal. A way forward."
-              : "Night falls on the station."}
-          </h2>
-          <p>
-            {snapshot.outcome === "success"
-              ? "The crew restored the uplink. Their choices, and your interventions, made a difference."
-              : `The uplink reached ${Math.floor(snapshot.repair)}%. Try a new approach: protect their energy, share supplies, or give them clearer guidance.`}
-          </p>
-          <div>
-            <button
-              onClick={() => {
-                setResultHidden(true);
-                setPanel("journal");
-                setPaused(true);
-              }}
-            >
-              Read the journal
-            </button>
-            <button className="primary" onClick={reset}>
-              Start a new day <ArrowUpRight size={16} />
-            </button>
-          </div>
-        </div>
       )}
     </main>
   );
